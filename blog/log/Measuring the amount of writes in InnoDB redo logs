@@ -1,0 +1,44 @@
+Choosing a good InnoDB log file size is key to InnoDB write performance. This can be done by measuring the amount of writes in the redo logs. You can find a detailed explanation in this post.
+To sum up, here are the main points:
+The redo logs should be large enough to store at most an hour of logs at peak-time
+You can either use the LSN in the SHOW ENGINE INNODB STATUS OUTPUT or the Innodb_os_log_written global status variable (if you are a Percona Server user, the LSN is also given by the Innodb_lsn_current status variable)
+While reviewing the recommendation I made for a customer, one of my colleagues told me I was wrong in my redo log size calculations. After each one double checked the calculations, it turned out that we experienced something not expected:
+Using Innodb_os_log_written, I found that around 7.15 GB of redo logs were written per hour
+Using the LSN, my colleague found 2.70 GB/hour (almost a 3x difference!)
+Something was obviously wrong in our understanding of how to measure the amount of writes in the redo logs. Let’s first have a look at what the documentation says. It states that
+Innodb_os_log_written is the number of bytes written to the log file
+The LSN is an arbitrary, ever-increasing value [that] represents a point in time corresponding to operations recorded in the redo log
+What is not obvious from the documentation is that while Innodb_os_log_written is incremented when the log file is written, the LSN is incremented when the log buffer is written.
+This is interesting. It means that the durability setting can skew the results: if innodb_flush_log_at_trx_commit is set to 0, you can accidentally omit or add 1 second of write activity. Of course if you measure variations over 60s, this will not explain a 3x difference with the LSN. It also means that if the write workload is very non uniform, you can easily get very different numbers if you are not taking measures exactly at the same time for the 2 methods.
+However, the write workload had not so much variance in my case. I also ran a test with a constant write workload (a mono-threaded script that inserts one row at a time in a table, as fast as it can) and I ended up with the same result: numbers were very different between the 2 methods. Even stranger, the innodb_os_log_written method consistently gave higher numbers than the LSN method, when we would have expected the opposite.
+It was time for digging into the source code. All the credits should actually be given to Alexey Kopytov, who not only took the time to read the code again and to make tests, but who also caught something we all missed: writing to the redo logs and increasing the LSN have completely different logics.
+The LSN simply shows the byte offset, so when you write 100 bytes to the log buffer, the LSN is increased by 100.
+Writing to the redo logs is a much more complicated process: every write is a 512-byte write and there can be overlapping writes. Not clear? Let’s look at an example when innodb_flush_log_at_trx_commit is set to 1 or 2 (again, thanks Alexey):
+Transaction 1 writes 100 bytes to the log buffer
+At commit, InnoDB writes a 512-byte block at offset xxx and increments Innodb_os_log_written by 512 bytes
+Transaction 2 writes 200 bytes to the log buffer
+At commit, InnoDB appends those 200 bytes to the same log block and overwrites the same 512-byte file block at offset xxx, then increases Innodb_os_log_written by another 512 bytes
+At this point, the LSN has increased by 300 and Innodb_os_log_written by 1024 (a 3x difference!). This means that the documentation is correct: Innodb_os_log_written is the number of bytes written to the redo logs. But it does not reflect the growth of the redo logs.
+So when you are trying to size the redo logs, looking at the LSN variations is a much better approximation than looking at the Innodb_os_log_written variations, which can be significantly far from the reality. However keep in mind that even the LSN is an approximate metric: if your write workload is non uniform and your sampling interval too short, you may well underestimate or overestimate the growth of your redo logs.
+
+
+
+James Day says:
+October 8, 2012 at 7:50 pm
+There are two big issues to watch out for:
+
+1. Async flushing when 75% of the log space is used. The size needs to be big enough so that this isn’t reached even when the server is doing occasional non-routine jobs. It’d probably take a month of hourly monitoring to identify times when more space than usual is required. Set it too small and you may wonder why a big insert statement only uses a small portion of your nice big buffer pool size.
+
+2. Adaptive flushing. The flushing rate depends in part on the percentage of dirty pages in the buffer pool and the percentage of the log file space used. Set the log size small and the flushing rate will be higher than it needs to be. Log file size and the adaptive flushing options can be used to adjust this. People with SSDs who want to improve their drive lifetime should pay particular attention to this, ensuring that they optimise for lifetime with nice big log files, not just making the log files small.
+
+People should be sure to set this to an amply large size and only adjust it smaller when they have clear evidence that the smaller size they use will neither cause async flushing nor excessive adaptive flushing. A nice log file size is important for handling non-regular loads like the time someone runs a big report and slows everything down, including log flushing.
+
+The OS will typically want to cache the log files in RAM so it is useful to tune so they aren’t a lot bigger than required. But it’s better to err on the too big than too small side because too small tends to cause occasional outages or disruption if the server hits async flushing unnecessarily. That costs someone money and/or sleep and is likely to be a poor trade off for saving a little disk space or RAM.
+
+Views are my own, for an official Oracle opinion consult a PR person.
+
+James Day, MySQL Senior Principal Support Engineer, Oracle.
+
+Arnaud says:
+October 9, 2012 at 2:04 am
+Hi Stephane, I noticed that difference too between LSN & Innodb_os_log_written but didn’t succeed to explain it, thanks for the explanations !
