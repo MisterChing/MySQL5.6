@@ -1,0 +1,61 @@
+通过查询一些资料，总结出如下区别
+
+1 二进制日志记录所有引擎的日志，而重做日志只记录InnoDB；
+
+2 二进制日志记录事务的具体操作内容，而后者记录每个页更改的物理情况；
+
+3 前者在事务提交前记录，后者则在事务进行中不断写入redo entry
+
+但依旧觉得不够完善，现有如下疑惑，希望高手解答一下1innodb表执行commit时，binary log和redo log应该分别记录其sql信息，其有何区别？且都在commit返回前完成吗？ 2innodb执行crash recovery时，需要用到binary log吗？ 3binary log切换后可自动生成新日志，不会被后续日志覆盖；而redo log只有参数指定的那么多，类似oracle的online redo，会被循环利用？ 4 binary log可用于replication而redo log则不需要？
+
+
+
+
+1 二进制日志记录所有引擎的日志，而重做日志只记录InnoDB；
+
+2 二进制日志记录事务的具体操作内容，而后者记录每个页更改的物理情况；
+
+3 前者在事务提交前记录，后者则在事务进行中不断写入redo entry
+
+记录数据库页的变化，诸如space id/page no/operation code/data，大致原理等同于oracle redo log，可用于crash recovery，但是其功能有一定局限。
+执行crash recovery时所操作的页必须是consistent，如果页已经损坏则无法recover，幸好及时引入了double write功能
+
+日志头存储着最近一次checkpoint信息，日志以记录而非页的方式写入，每次512字节，SSD可以设置4096字节；
+
+Redo log不能归档，因此必须循环利用，其相应设置参数为innodb_log_file_size/innodb_log_files_in_group/innodb_log_group_home_dir
+选择合适的文件大小对innodb写性能至关重要，通常一个文件至少能够容纳一个小时的日志量
+
+Mysql采用fuzzy checkpoint机制，每次读取最老的脏页，将其LSN作为检查点记录到日志文件(这之前的LSN对应的日志和数据都写入文件，不需要恢复)；
+恢复数据文件时，innodb扫描日志文件的检查点信息，只恢复page LSN> checkpoint LSN的内容
+
+redo log刷新条件：
+每秒刷新一次，由master thread执行；
+事务commit，由参数innodb_flush_log_at_trx_commit决定，0表示不刷新，1同步刷新，2异步刷新至磁盘
+
+Innodb_flush_log_at_trx_commit
+同oracle一样，commit返回前提交所有的redo log，不同的是，innodb提供innodb_flush_log_at_trx_commit参数定制化commit返回时日志是否刷新到磁盘，
+innodb_flush_log_at_trx_commit = 0 /* Write log buffer to log about once a second and flush */
+innodb_flush_log_at_trx_commit = 1 /* Write log buffer to log and flush to disk */
+innodb_flush_log_at_trx_commit = 2 /* Write log buffer to log and flush about once per second */
+数据库crash仍能保证数据一致性，而操作系统crash则可能导致部分记录丢失
+可使用有备用电池的存储与之互补，即提升速度又能保证数据一致性
+
+与二进制日志区别：
+1 二进制日志记录所有引擎的日志，而重做日志只记录InnoDB；
+2 二进制日志记录事务的具体操作内容，而后者记录每个页更改的物理情况；
+3 前者用于point-in-time恢复，后者用于crash recovery；如果mysql发生介质损坏，则需要从备份中恢复然后应用binary log执行point-in-time recovery
+
+
+
+
+1 innodb表执行commit时，binary log和redo log应该分别记录其sql信息，其有何区别？且都在commit返回前完成吗？
+在记录sql方面没有任何区别，都是在commit返回成功信息后记载的。
+
+2 innodb执行crash recovery时，需要用到binary log吗？
+一般不需要用到binary log，只用到 redo log和undo log。
+
+3 binary log切换后可自动生成新日志，不会被后续日志覆盖；而redo log只有参数指定的那么多，类似oracle的online redo，会被循环利用？
+恩，有点类似oracle的，可以重复写，但是在被覆盖之前，都会保证已经写入binary log里面去了。
+
+4 binary log可用于replication而redo log则不需要？
+binary log用于replication，redo log不需要，目前的版本都是如此的。
