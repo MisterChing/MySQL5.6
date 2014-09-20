@@ -1,0 +1,44 @@
+【背景】
+  某业务数据库load 报警异常，cpu usr 达到30-40 ，居高不下。使用工具查看数据库正在执行的sql ，排在前面的大部分是：
+
+SELECT id, cu_id, name, info, biz_type, gmt_create, gmt_modified,start_time, end_time, market_type, back_leaf_category,item_status,picuture_url FROM relation where biz_type ='0' AND end_time >='2014-05-29' ORDER BY id asc LIMIT 149420 ,20;
+表的数据量大致有36w左右，该sql是一个非常典型的排序+分页查询：order by col limit N,OFFSET M , MySQL 执行此类sql时需要先扫描到N行，然后再去取 M行。对于此类大数据量的排序操作，取前面少数几行数据会很快，但是越靠后，sql的性能就会越差，因为N越大，MySQL 需要扫描不需要的数据然后在丢掉，这样耗费大量的时间。
+
+【分析】
+针对limit 优化有很多种方式，
+1 前端加缓存，减少落到库的查询操作
+2 优化SQL
+3 使用书签方式 ，记录上次查询最新/大的id值，向后追溯 M行记录。
+4 使用Sphinx 搜索优化。
+对于第二种方式 我们推荐使用"延迟关联"的方法来优化排序操作，何谓"延迟关联" ：通过使用覆盖索引查询返回需要的主键,再根据主键关联原表获得需要的数据。
+
+【解决】
+根据延迟关联的思路，修改SQL 如下：
+优化前
+点击(此处)折叠或打开
+root@xxx 12:33:48>explain SELECT id, cu_id, name, info, biz_type, gmt_create, gmt_modified,start_time, end_time, market_type, back_leaf_category,item_status,picuture_url FROM relation where biz_type =\'0\' AND end_time >=\'2014-05-29\' ORDER BY id asc LIMIT 149420 ,20;
++----+-------------+-------------+-------+---------------+-------------+---------+------+--------+-----------------------------+
+| id | select_type | table       | type  | possible_keys | key         | key_len | ref  | rows   | Extra                       |
++----+-------------+-------------+-------+---------------+-------------+---------+------+--------+-----------------------------+
+| 1  | SIMPLE      | relation    | range | ind_endtime   | ind_endtime | 9       | NULL | 349622 | Using where; Using filesort |
++----+-------------+-------------+-------+---------------+-------------+---------+------+--------+-----------------------------+
+1 row in set (0.00 sec)
+其执行时间：
+
+优化后：
+点击(此处)折叠或打开
+SELECT a.* FROM relation a, (select id from relation where biz_type ='0' AND end_time >='2014-05-29' ORDER BY id asc LIMIT 149420 ,20 ) b where a.id=b.id
+
+root@xxx 12:33:43>explain SELECT a.* FROM relation a, (select id from relation where biz_type ='0' AND end_time >='2014-05-29' ORDER BY id asc LIMIT 149420 ,20 ) b where a.id=b.id;
++----+-------------+-------------+--------+---------------+---------+---------+------+--------+-------+
+| id | select_type | table       | type   | possible_keys | key     | key_len | ref  | rows   | Extra |
++----+-------------+-------------+--------+---------------+---------+---------+------+--------+-------+
+| 1  | PRIMARY     | <derived2>  | ALL    | NULL          | NULL    | NULL    | NULL | 20     |       |
+| 1  | PRIMARY     | a           | eq_ref | PRIMARY       | PRIMARY | 8       | b.id | 1      |       |
+| 2  | DERIVED     | relation    | index  | ind_endtime   | PRIMARY | 8       | NULL | 733552 |       |
++----+-------------+-------------+--------+---------------+---------+---------+------+--------+-------+
+3 rows in set (0.36 sec)
+执行时间：
+
+
+优化后 执行时间 为原来的1/3 。
