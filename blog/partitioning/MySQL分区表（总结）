@@ -1,0 +1,251 @@
+分区表是一种粗粒度,简易的索引策略,适用于大数据的过滤场景.最适合的场景是,没有合适的索引时,对其中几个分区表进行全表扫描.或者只有一个分区表和索引是热点,而且这个分区和索引能够全部存储在内存中.限制单表分区数不要超过150个,并且注意某些导致无法做分区过滤的细节,分区表对于单条记录的查询没有优势,需要注意这类查询的性能.
+
+分区表语法
+分区表分为RANGE,LIST,HASH,KEY四种类型,并且分区表的索引是可以局部针对分区表建立的
+创建分区表
+CREATE TABLE sales (
+    id INT AUTO_INCREMENT,
+    amount DOUBLE NOT NULL,
+    order_day DATETIME NOT NULL,
+    PRIMARY KEY(id, order_day)
+) ENGINE=Innodb PARTITION BY RANGE(YEAR(order_day)) (
+    PARTITION p_2010 VALUES LESS THAN (2010),
+    PARTITION p_2011 VALUES LESS THAN (2011),
+    PARTITION p_2012 VALUES LESS THAN (2012),
+    PARTITION p_catchall VALUES LESS THAN MAXVALUE);
+    
+这段语句表示将表内数据按照order_dy的年份范围进行分区,2010年一个区,2011一个,2012一个,剩下的一个.
+要注意如果这么做,则order_day必须包含在主键中,且会产生一个问题,就是当年份超过阈值,到了2013,2014时,需要手动创建这些分区
+替代方法就是使用HASH
+CREATE TABLE sales (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    amount DOUBLE NOT NULL,
+    order_day DATETIME NOT NULL
+) ENGINE=Innodb PARTITION BY HASH(id DIV 1000000);
+
+这种分区表示每100W条数据建立一个分区,且没有阈值范围的影响
+    
+对于大数据而言
+　　对于大数据(如10TB)而言,索引起到的作用相对小,因为索引的空间与维护成本很高,另外如果不是索引覆盖查询,将导致回表,造成大量磁盘IO.那么对于这种情况的解决策略是:
+　　1.全量扫描数据,不要任何索引
+　　通过分区表表达式将数据定位在少量的分区表,然后正常访问这些分区表的数据
+　　2.分离热点,索引数据
+　　将热点数据分离出来在一个小的分区,并对分区建立索引,对热点数据的查询提高效率.
+
+分区表的问题
+　　1.NULL值使分区过滤无效
+　　假设按照RANGE YEAR(order_date)分区,那么如果这个表达式计算出来的时NULL值,记录就会被存放到第一个分区.所以在查询时加入查询条件有可能出现NULL值,那么就会去检查第一个分区.解决的方法可以是将第一个分区建立为NULL分区 PARTITION p_nulls VALUES LESS THAN (0),或者在MySQL5.5以后,直接使用COLUMN建立分区 PARTITION BY RANGE COLUMNS(order_date)
+　　2. 选择分区的成本
+　　每插入一行数据都需要按照表达式筛选插入的分区地址
+　　3. 分区列和索引列不匹配
+　　如果索引列和分区列不匹配,且查询中没有包含过滤分区的条件,会导致无法进行分区过滤,那么将会导致查询所有分区.
+　　4. 打开并锁住所有底层表
+　　分区表的的查询策略是在分区过滤之前,打开并锁住所有底层表,这会造成额外的开销,解决问题的方法是尽量使用批量操作,例如LOAD DATA INFILE,或者一次删除多行数据.
+ 
+过滤分区表的要点
+　　过滤分区表的WHERE条件必须是切分分区表的列,而不能带有函数,例如只能是order_day赤裸列,而不能是YEAR(order_day)
+
+
+
+关于Partitioning Keys, Primary Keys, and Unique Keys的限制
+在5.1中分区表对唯一约束有明确的规定，每一个唯一约束必须包含在分区表的分区键（也包括主键约束）。
+这句话也许不好理解，我们做几个实验：
+
+CREATE TABLE t1     
+(      id INT NOT NULL,        
+       uid INT NOT NULL,  
+       PRIMARY KEY (id)  
+)  
+PARTITION BY RANGE (id)     
+(PARTITION p0 VALUES LESS THAN(5) ENGINE = INNODB,  
+ PARTITION p1 VALUES LESS THAN(10) ENGINE = INNODB  
+);  
+   
+CREATE TABLE t1     
+(      id INT NOT NULL,        
+       uid INT NOT NULL,  
+       PRIMARY KEY (id)  
+)  
+PARTITION BY RANGE (id)     
+(PARTITION p0 VALUES LESS THAN(5) ENGINE = MyISAM DATA DIRECTORY='/tmp' INDEX DIRECTORY='/tmp',  
+ PARTITION p1 VALUES LESS THAN(10) ENGINE = MyISAM DATA DIRECTORY='/tmp' INDEX DIRECTORY='/tmp'  
+);  
+   
+mysql> CREATE TABLE t1     
+    -> (      id INT NOT NULL,        
+    ->        uid INT NOT NULL,  
+    ->        PRIMARY KEY (id),  
+    ->        UNIQUE KEY (uid)  
+    -> )  
+    -> PARTITION BY RANGE (id)     
+    -> (PARTITION p0 VALUES LESS THAN(5),  
+    ->  PARTITION p1 VALUES LESS THAN(10)  
+    -> );  
+ERROR 1503 (HY000): A UNIQUE INDEX must include all columns in the table's partitioning function  
+ 
+关于存储引擎的限制
+2.1 MERGE引擎不支持分区，分区表也不支持merge。
+2.2 FEDERATED引擎不支持分区。这限制可能会在以后的版本去掉。
+2.3 CSV引擎不支持分区
+2.4 BLACKHOLE引擎不支持分区
+2.5 在NDBCLUSTER引擎上使用分区表，分区类型只能是KEY(or LINEAR KEY) 分区。
+2.6 当升级MYSQL的时候，如果你有使用了KEY分区的表（不管是什么引擎，NDBCLUSTER除外），那么你需要把这个表dumped在 reloaded。
+2.7 分区表的所有分区或者子分区的存储引擎必须相同，这个限制也许会在以后的版本取消。
+不指定任何引擎（使用默认引擎）。
+所有分区或者子分区指定相同引擎。
+
+关于函数的限制
+在mysql5.1中建立分区表的语句中，只能包含下列函数(5.5版本的限制没这么严格了，可以是非整型列):
+ABS()
+CEILING() and FLOOR() （在使用这2个函数的建立分区表的前提是使用函数的分区键是INT类型），例如
+
+mysql> CREATE TABLE t (c FLOAT) PARTITION BY LIST( FLOOR(c) )(  
+    -> PARTITION p0 VALUES IN (1,3,5),  
+    -> PARTITION p1 VALUES IN (2,4,6)  
+    -> );;  
+ERROR 1491 (HY000): The PARTITION function returns the wrong type  
+   
+mysql> CREATE TABLE t (c int) PARTITION BY LIST( FLOOR(c) )(  
+    -> PARTITION p0 VALUES IN (1,3,5),  
+    -> PARTITION p1 VALUES IN (2,4,6)  
+    -> );  
+Query OK, 0 rows affected (0.01 sec)  
+
+DAY()
+DAYOFMONTH()
+DAYOFWEEK()
+DAYOFYEAR()
+DATEDIFF()
+EXTRACT()
+HOUR()
+MICROSECOND()
+MINUTE()
+MOD()
+MONTH()
+QUARTER()
+SECOND()
+TIME_TO_SEC()
+TO_DAYS()
+WEEKDAY()
+YEAR()
+YEARWEEK()
+ 
+其他限制
+4.1 对象限制
+下面这些对象在不能出现在分区表达式
+Stored functions, stored procedures, UDFs, or plugins.
+Declared variables or user variables.
+4.2 运算限制
+支持加减乘等运算出现在分区表达式，但是运算后的结果必须是一个INT或者NULL。 |, &, ^, <<, >>, , ~ 等不允许出现在分区表达式中
+4.3 sql_mode限制
+官方强烈建议你在创建分区表后，永远别改变mysql的sql_mode。因为在不同的模式下，某些函数或者运算返回的结果可能会不一样。
+4.4 Performance considerations.(省略)
+4.5 最多支持1024个分区，包括子分区。
+当你建立分区表包含很多分区但没有超过1024限制的时候，如果报错 Got error 24 from storage engine，那意味着你需要增大open_files_limit参数。
+4.6 不支持外键。MYSQL中，INNODB引擎才支持外键。
+4.7 不支持FULLTEXT indexes（全文索引），包括MYISAM引擎。
+mysql> CREATE TABLE articles (  
+    -> id INT UNSIGNED AUTO_INCREMENT NOT NULL PRIMARY KEY,  
+    -> title VARCHAR(200),  
+    -> body TEXT,  
+    -> FULLTEXT (title,body)  
+    -> )  
+    -> PARTITION BY HASH(id)  
+    -> PARTITIONS 4;  
+ERROR 1214 (HY000): The used table type doesn't support FULLTEXT indexes  
+4.8 不支持spatial column types。
+4.9 临时表不能被分区。
+
+mysql> CREATE Temporary TABLE t1     
+    -> (      id INT NOT NULL,        
+    ->        uid INT NOT NULL,  
+    ->        PRIMARY KEY (id)  
+    -> )  
+    -> PARTITION BY RANGE (id)     
+    -> (PARTITION p0 VALUES LESS THAN(5) ENGINE = MyISAM,  
+    ->  PARTITION p1 VALUES LESS THAN(10) ENGINE = MyISAM  
+    -> );  
+ERROR 1562 (HY000): Cannot create temporary table with partitions  
+
+4.10 log table不支持分区。
+mysql> alter table mysql.slow_log PARTITION BY KEY(start_time) PARTITIONS 2;  
+ERROR 1221 (HY000): Incorrect usage of PARTITION and log table  
+
+4.11 分区键必须是INT类型，或者通过表达式返回INT类型，可以为NULL。唯一的例外是当分区类型为KEY分区的时候，可以使用其他类型的列作为分区键（ BLOB or TEXT 列除外）。
+
+mysql> CREATE TABLE tkc (c1 CHAR)  
+    -> PARTITION BY KEY(c1)  
+    -> PARTITIONS 4;  
+Query OK, 0 rows affected (0.00 sec)  
+   
+mysql> CREATE TABLE tkc2 (c1 CHAR)  
+    -> PARTITION BY HASH(c1)  
+    -> PARTITIONS 4;  
+ERROR 1491 (HY000): The PARTITION function returns the wrong type  
+   
+mysql> CREATE TABLE tkc3 (c1 INT)  
+    -> PARTITION BY HASH(c1)  
+    -> PARTITIONS 4;  
+Query OK, 0 rows affected (0.00 sec)  
+
+4.12 分区键不能是一个子查询。 A partitioning key may not be a subquery, even if that subquery resolves to an integer value or NULL
+4.13 只有RANG和LIST分区能进行子分区。HASH和KEY分区不能进行子分区。
+4.14 分区表不支持Key caches。
+
+SQL代码
+mysql> SET GLOBAL keycache1.key_buffer_size=128*1024;  
+Query OK, 0 rows affected (0.00 sec)  
+mysql> CACHE INDEX login,user_msg,user_msg_p IN keycache1;  
++-----------------+--------------------+----------+---------------------------------------------------------------------+  
+| Table           | Op                 | Msg_type | Msg_text                                                            |  
++-----------------+--------------------+----------+---------------------------------------------------------------------+  
+| test.login      | assign_to_keycache | status   | OK                                                                  |   
+| test.user_msg   | assign_to_keycache | status   | OK                                                                  |   
+| test.user_msg_p | assign_to_keycache | note     | The storage engine for the table doesn't support assign_to_keycache |   
++-----------------+--------------------+----------+---------------------------------------------------------------------+  
+3 rows in set (0.00 sec)  
+
+4.15 分区表不支持INSERT DELAYED.
+
+mysql> insert  DELAYED into user_msg_p values(18156629,0,0,0,0,0,0,0,0,0);  
+ERROR 1616 (HY000): DELAYED option not supported for table 'user_msg_p'  
+
+4.16 DATA DIRECTORY 和 INDEX DIRECTORY 参数在分区表将被忽略。
+这个限制应该不存在了：
+SQL代码
+mysql> CREATE TABLE t1     
+    -> (      id INT NOT NULL,        
+    ->        uid INT NOT NULL,  
+    ->        PRIMARY KEY (id)  
+    -> )  
+    -> PARTITION BY RANGE (id)     
+    -> (PARTITION p0 VALUES LESS THAN(5) ENGINE = MyISAM DATA DIRECTORY='/tmp' INDEX DIRECTORY='/tmp',  
+    ->  PARTITION p1 VALUES LESS THAN(10) ENGINE = MyISAM DATA DIRECTORY='/tmp' INDEX DIRECTORY='/tmp'  
+    -> );  
+Query OK, 0 rows affected (0.01 sec)  
+
+4.17 分区表不支持mysqlcheck和myisamchk
+在5.1.33版本中已经支持mysqlcheck和myisamchk
+SQL代码
+./mysqlcheck -u -p -r test user_msg_p;  
+test.user_msg_p                                    OK  
+   
+./myisamchk -i /u01/data/test/user_msg_p#P#p0.MYI  
+Checking MyISAM file: /u01/data/test/user_msg_p#P#p0.MYI  
+Data records: 4423615   Deleted blocks:       0  
+- check file-size  
+- check record delete-chain  
+- check key delete-chain  
+- check index reference  
+- check data record references index: 1  
+Key:  1:  Keyblocks used:  98%  Packed:    0%  Max levels:  4  
+Total:    Keyblocks used:  98%  Packed:    0%  
+   
+User time 0.97, System time 0.02  
+Maximum resident set size 0, Integral resident set size 0  
+Non-physical pagefaults 324, Physical pagefaults 0, Swaps 0  
+Blocks in 0 out 0, Messages in 0 out 0, Signals 0  
+Voluntary context switches 1, Involuntary context switches 5  
+
+4.18 分区表的分区键创建索引，那么这个索引也将被分区。分区键没有全局索引一说。
+5.19 在分区表使用ALTER TABLE … ORDER BY，只能在每个分区内进行order by。
