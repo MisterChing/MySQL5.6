@@ -1,0 +1,90 @@
+1.indexsort 利用有序索引获取有序数据
+原理：
+我们知道，mysql的基础数据结构是B+树，任何的一个表都是一颗B+树，你在表上建的索引也是一颗B+树，B+树的特别是在叶子节点上是有序，且前一个节点存在指向相邻节点的指针。
+那么我在写SQL中的ORDER BY语句时候，若是ORDER BY的条件和返回的数据都在一颗树上，那么就可以利用B+树自身的特点来天然排序了，自然效率会比较高。
+使用条件：
+1)查询的WHERE子句和ORDER BY子句中查询的字段在同一颗索引树上，
+2)ORDER BY 字段的顺序是跟建立索引的顺序是一致的。
+3)查询的字段也在同一颗索引树
+2.filesort 文件排序
+原理：
+这里的文件排序并不是字面那表示的意思，利用了磁盘IO来进行排序，不过是优化器告诉你，进行了一个排序操作，具体排序的地方还是内存，相对应的参数是sort_buffer_size 设定的大小
+1)filesort不一定会产生临时表
+2)filesort 与临时表数据写入磁盘是没有任何直接联系
+使用情景：
+任何非索引排序的场景下
+3.实战：
+CREATE TABLE `A_index` (
+`c1` INT(11) NOT NULL AUTO_INCREMENT ,
+`c2` SMALLINT(2) ,
+`c3` VARCHAR(16) ,
+`c4` VARCHAR(16) ,
+`c5` VARCHAR(16) ,
+PRIMARY KEY (`c1`),
+KEY `c2_ind` (`c2`),
+KEY `c3_c4_c5_ind` (`c3`,`c4`,`c5`)
+) ENGINE=INNODB DEFAULT CHARSET=utf8
+1)查询的字段和ORDER BY 字段在同一个索引树中：
+mysql> EXPLAIN SELECT c3 FROM A_index ORDER BY c3 ,c4 ,c5 ;
++—-+————-+———+——-+—————+————–+———+——+——+————-+
+| id | select_type | table | type | possible_keys | key | key_len | ref | rows | Extra |
++—-+————-+———+——-+—————+————–+———+——+——+————-+
+| 1 | SIMPLE | A_index | index | NULL | c3_c4_c5_ind | 153 | NULL | 1 | Using index |
++—-+————-+———+——-+—————+————–+———+——+——+————-+
+1 row in set (0.02 sec)
+2)where 及 order by 中的字段在同一颗树中
+mysql> EXPLAIN SELECT c3 FROM A_index where c3=”1″ ORDER BY c3 ,c4 ,c5 ;
++—-+————-+———+——+—————+————–+———+——-+——+————————–+
+| id | select_type | table | type | possible_keys | key | key_len | ref | rows | Extra |
++—-+————-+———+——+—————+————–+———+——-+——+————————–+
+| 1 | SIMPLE | A_index | ref | c3_c4_c5_ind | c3_c4_c5_ind | 51 | const | 1 | Using where; Using index |
++—-+————-+———+——+—————+————–+———+——-+——+————————–+
+1 row in set (0.00 sec)
+对于上面的差别是做了一次回表
+3)where 及 order by 中的字段不在同一颗树中
+mysql> EXPLAIN SELECT c3 FROM A_index where c2=1 ORDER BY c3 ,c4 ,c5 ;
++—-+————-+———+——+—————+——–+———+——-+——+—————————–+
+| id | select_type | table | type | possible_keys | key | key_len | ref | rows | Extra |
++—-+————-+———+——+—————+——–+———+——-+——+—————————–+
+| 1 | SIMPLE | A_index | ref | c2_ind | c2_ind | 3 | const | 1 | Using where; Using filesort |
++—-+————-+———+——+—————+——–+———+——-+——+—————————–+
+1 row in set (0.01 sec)
+在两颗索引树中后，就走的是filesort了。
+4)查询的字段和ORDER BY 字段不在同一个索引树中：
+mysql> EXPLAIN SELECT c2 FROM A_index ORDER BY c3 ,c4 ,c5 ;
++—-+————-+———+——+—————+——+———+——+——+—————-+
+| id | select_type | table | type | possible_keys | key | key_len | ref | rows | Extra |
++—-+————-+———+——+—————+——+———+——+——+—————-+
+| 1 | SIMPLE | A_index | ALL | NULL | NULL | NULL | NULL | 1 | Using filesort |
++—-+————-+———+——+—————+——+———+——+——+—————-+
+1 row in set (0.00 sec)
+5)查询的字段和ORDER BY 字段在同一个索引树中，但是order by 顺序不同
+mysql> EXPLAIN SELECT c3 FROM A_index ORDER BY c4 , c3 ,c5 ;
++—-+————-+———+——-+—————+————–+———+——+——+—————————–+
+| id | select_type | table | type | possible_keys | key | key_len | ref | rows | Extra |
++—-+————-+———+——-+—————+————–+———+——+——+—————————–+
+| 1 | SIMPLE | A_index | index | NULL | c3_c4_c5_ind | 153 | NULL | 1 | Using index; Using filesort |
++—-+————-+———+——-+—————+————–+———+——+——+—————————–+
+1 row in set (0.00 sec)
+看到排序使用的是filesort，对于c3的查找用的是索引
+4.优化filesort
+从上面的索引排序使用限制上可以看出，我们大部分的业务场景应该是在filesort下，那么就该想着如何优化filesort。
+filesort的两种排序算法：
+双路排序
+1)取出所有排序的字段及对应行数据的指针信息(指向具体的叶子节点数据)
+2)在内存中进行排序
+3)再通过指针取得具体的数据
+单路排序
+1)去除所有排序的字段及所有行信息
+2)在内存中进行排序
+两种的差别在于第一种需要两次磁盘IO，而第二种只需要一次，但第二种需要更大的内存开销。
+优化器如何选择主要是根据 max_length_for_sort_data 系统参数设置的大小
+mysql> show variables like ‘%max_length%’;
++————————–+——-+
+| Variable_name | Value |
++————————–+——-+
+| max_length_for_sort_data | 1024 |
++————————–+——-+
+1 row in set (0.00 sec)
+若是查询出来的数据大小 > max_length_for_sort_data ，那么使用双路排序
+若是查询出来的数据大小 < max_length_for_sort_data ，那么使用单路排序
