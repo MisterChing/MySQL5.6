@@ -1,0 +1,42 @@
+今天碰到一个问题,如下一个表linuxeye的两列id、status，现在要统计数据格式如下，Google找到2种方法，引出Mysql中Group by子句结合count使用的效率问题
+
+mysql>> select id,status from linuxeye;
++-----------+--------+
+| id | status |
++-----------+--------+
+|         4 | R      |
+|         1 | R      |
+|         2 | R      |
+|         2 | S      |
+|         5 | R      |
+|         5 | C      |
+|         3 | R      |
+|         5 | C      |
+|         5 | R      |
+|         3 | R      |
+|         3 | O     |
+....
++-----------+----------+----------+----------+----------+
+| id | status_O | status_S | status_C | status_R |
++-----------+----------+----------+----------+----------+
+|         1 |        0 |        1 |        1 |        2 |
+|         2 |        0 |        1 |        0 |        2 |
+|         3 |        0 |        0 |        1 |        3 |
+|         4 |        0 |        0 |        0 |        2 |
+...
+select id, \
+(select count(*) from linuxeye where id=other.id and status='O') as status_O,\
+(select count(*) from linuxeye where id=other.id and status='S' ) as status_S,\
+(select count(*) from linuxeye where id=other.id and status='C' ) as status_C,\
+(select count(*) from linuxeye where id=other.id and status='R'  ) as status_R \
+from linuxeye as other group by id;
+此方法中，group by子句在扫描表的时候，每一篇文章的都去执行了两次count，因此效率极低
+
+select id,\
+sum(case when status='O'  then 1 else 0 end) as status_O, \
+sum(case when status='S'   then 1 else 0 end) as status_S, \
+sum(case when status='C'   then 1 else 0 end) as status_C, \
+sum(case when status='R'   then 1 else 0 end) as status_R \
+from linuxeye group by id;
+此方法，总共只需要执行一次表扫描，并且没有每次都count一下，而是用sum求一个总和，大大了减少了查询时间。效率会提高几百甚至几千倍
+
