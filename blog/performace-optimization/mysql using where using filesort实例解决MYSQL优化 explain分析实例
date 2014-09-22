@@ -1,0 +1,28 @@
+MySQL 数据库，MyISAM 类型的表 table_item，有 5、6 个字段，主键是 id。user_id 和 item_id 两个字段都是单独的 INDEX 类型的索引。
+
+问题是如何发现的？
+今天搞程序，在自己的开发环境下，打开一个简单的页面都要好长时间，不知道问题出在哪里，只发现硬盘灯闪个不停。
+观察 Windows 的任务管理器，看到 mysqld-nt.exe 这个进程的 “I/O 读取字节” 高达十几 G！！！
+再次测试，发现每次刷新页面，这个进程要读取几十 M 的数据。
+奇了怪了，查看 SQL 语句，还有表结构，字段都建了索引了呀。
+后来 EXPLAIN 了一下，看到结果是 Using where; Using filesort。
+explain SELECT * FROM table_item WHERE user_id = 2 ORDER BY item_id LIMIT 0, 5
+翻了 MySQL 手册，仔细看下 filesort 的说明，知道了 Using filesort 是一种速度很慢的外部排序。
+不过我不理解为什么会使用 filesort 排序，WHERE 和 ORDER BY 用到的字段都是有索引的呀。
+赶紧 Google，找到几篇解释 Using filesort 的文章，得到的启示就是索引定义不当，MySQL 没有用到索引。
+记得以前 Chenbin 给俺们培训过 MySQL 的优化，我还参加了两次，总感觉自己了解了如何优化 MySQL，没想到这么简单的语句我都没能优化。
+现在想起来一些 MySQL 的特性了。
+?? 1. 一条 SQL 语句只能使用 1 个索引 (5.0-)，MySQL 根据表的状态，选择一个它认为最好的索引用于优化查询
+?? 2. 联合索引，只能按从左到右的顺序依次使用
+这 2 点刚好可以解决我的问题。
+user_id 和 item_id 是 2 个索引，我的语句中，MySQL 选择了 user_id，那么 item_id 的索引没有起到任何用处，所以，当我要排序的时候，由于记录数较多，内存中的排序 buffer 满了，只能 Using filesort 进行外部排序，因此每次查询要从磁盘读取几十 M 的数据，太慢了。
+修改表结构，删除 user_id 和 item_id 的 INDEX 索引，建立一个名为 user_item 的联合 UNIQUE 索引，顺序是先 user_id 后 item_id，再 EXPLAIN，这回只有 Using where 了。
+再刷新页面，观察任务管理器，mysqld-nt.exe 只读取了 2K 的数据，页面咔的一下就出来了……
+关于索引：
+一条sql语句里面关联的表每个表只能用一个索引，5.0之后如果查询条件里面有多个索引字段，mysql会尝试进行 index merge，同时使用几个索引的合集。在explain我们所使用的sql的时候，经常会遇到using filesort这种情况，原来我以为是由于有相同的列值的原因引起的，结果昨天看到公司的一个sql，跟同事讨论了一下加上自己又做了一些测试，突然发现自己原来的想法是错的。
+首先，只有在order by 数据列的时候才会出现using filesort，而且如果你不对进行order by的这一列设置索引的话，无论列值是否有相同的都会出现using filesort。因此，只要用到order by 的这一列都应该为其建立一个索引。
+其次，在这次测试中，使用了一个稍微有点复杂的例子来说明这个问题，下面详细用这个例子说一下：
+SELECT * FROM DB.TB WHERE ID=2000010000 AND FID IN (9,8,3,13,38,40) ORDER BY INVERSE_DATE LIMIT 0, 5
+里面建立的索引为一个三列的多列索引：IDX（ID,FID ,INVERSE_DATE） 。INVERSE_DATE这个是时间的反向索引。
+对于这个sql我当时最开始认为应该是个优化好的状态，应该没有什么纰漏了，结果一explain才发现竟然出现了：Using where; Using filesort。
+汗。。。为什么呢，后来经过分析才得知，原来在多列索引在建立的时候是以B-树结构建立的，因此建立索引的时候是先建立ID的按顺序排的索引，在相同ID的情况下建立FID按 顺序排的索引，最后在FID 相同的情况下建立按INVERSE_DATE顺序排的索引，如果列数更多以此类推。有了这个理论依据我们可以看出在这个sql使用这个IDX索引的时候只是用在了order by之前，order by INVERSE_DATE 实际上是using filesort出来的。。汗死了。。因此如果我们要在优化一下这个sql就应该为它建立另一个索引IDX（ID,INVERSE_DATE），这样就消除了using filesort速度也会快很多。。问题终于解决了。。- -！ 
