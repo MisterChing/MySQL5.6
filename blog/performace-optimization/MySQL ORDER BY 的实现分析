@@ -1,0 +1,183 @@
+总的来说，在 MySQL 中的ORDER BY有两种排序实现方式，一种是利用有序索引获取有序数据，另一种则是通过相应的排序算法，将取得的数据在内存中进行排序。
+
+下面将通过实例分析两种排序实现方式及实现图解：
+假设有 Table A 和 B 两个表结构分别如下：
+
+sky@localhost : example 01:48:21&gt; show create table A\G
+*************************** 1. row ***************************
+Table: A
+Create Table: CREATE TABLE `A` (
+`c1` int(11) NOT NULL default '0',
+`c2` char(2) default NULL,
+`c3` varchar(16) default NULL,
+`c4` datetime default NULL,
+PRIMARY KEY  (`c1`)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8
+ 
+sky@localhost : example 01:48:32&gt; show create table B\G
+*************************** 1. row ***************************
+Table: B
+Create Table: CREATE TABLE `B` (
+`c1` int(11) NOT NULL default '0',
+`c2` char(2) default NULL,
+`c3` varchar(16) default NULL,
+PRIMARY KEY  (`c1`),
+KEY `B_c2_ind` (`c2`)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8
+1、利用有序索引进行排序，实际上就是当我们 Query 的 ORDER BY 条件和 Query 的执行计划中所利用的 Index 的索引键（或前面几个索引键）完全一致，且索引访问方式为 rang、 ref 或者 index 的时候，MySQL 可以利用索引顺序而直接取得已经排好序的数据。这种方式的 ORDER BY 基本上可以说是最优的排序方式了，因为 MySQL 不需要进行实际的排序操作。
+
+假设我们在Table A 和 B 上执行如下SQL：
+
+sky@localhost : example 01:44:28&gt; EXPLAIN SELECT A.* FROM A,B
+-&gt; WHERE A.c1 &gt; 2 AND A.c2 &lt; 5 AND A.c2 = B.c2 ORDER BY A.c1\G
+*************************** 1. row ***************************
+id: 1
+select_type: SIMPLE
+table: A
+type: range
+possible_keys: PRIMARY
+key: PRIMARY
+key_len: 4
+ref: NULL
+rows: 3
+Extra: Using where
+*************************** 2. row ***************************
+id: 1
+select_type: SIMPLE
+table: B
+type: ref
+possible_keys: B_c2_ind
+key: B_c2_ind
+key_len: 7
+ref: example.A.c2
+rows: 2
+Extra: Using where; Using index
+我们通过执行计划可以看出，MySQL实际上并没有进行实际的排序操作，实际上其整个执行过程如下图所示：
+
+
+
+2、通过相应的排序算法，将取得的数据在内存中进行排序方式，MySQL 比需要将数据在内存中进行排序，所使用的内存区域也就是我们通过 sort_buffer_size 系统变量所设置的排序区。这个排序区是每个 Thread 独享的，所以说可能在同一时刻在 MySQL 中可能存在多个 sort buffer 内存区域。
+
+第二种方式在 MySQL Query Optimizer 所给出的执行计划（通过 EXPLAIN 命令查看）中被称为 filesort。在这种方式中，主要是由于没有可以利用的有序索引取得有序的数据，MySQL只能通过将取得的数据在内存中进行排序然后再将数据返回给客户端。在 MySQL 中 filesort 的实现算法实际上是有两种的，一种是首先根据相应的条件取出相应的排序字段和可以直接定位行数据的行指针信息，然后在 sort buffer 中进行排序。另外一种是一次性取出满足条件行的所有字段，然后在 sort buffer 中进行排序。
+
+在 MySQL4.1 版本之前只有第一种排序算法，第二种算法是从 MySQL4.1开始的改进算法，主要目的是为了减少第一次算法中需要两次访问表数据的 IO 操作，将两次变成了一次，但相应也会耗用更多的 sort buffer 空间。当然，MySQL4.1开始的以后所有版本同时也支持第一种算法，MySQL 主要通过比较我们所设定的系统参数 max_length_for_sort_data 的大小和 Query 语句所取出的字段类型大小总和来判定需要使用哪一种排序算法。如果 max_length_for_sort_data 更大，则使用第二种优化后的算法，反之使用第一种算法。所以如果希望 ORDER BY 操作的效率尽可能的高，一定要主义 max_length_for_sort_data 参数的设置。曾经就有同事的数据库出现大量的排序等待，造成系统负载很高，而且响应时间变得很长，最后查出正是因为 MySQL 使用了传统的第一种排序算法而导致，在加大了 max_length_for_sort_data 参数值之后，系统负载马上得到了大的缓解，响应也快了很多。
+
+我们再看看 MySQL 需要使用 filesort 实现排序的实例。
+
+假设我们改变一下我们的 Query，换成通过A.c2来排序，再看看情况：
+
+sky@localhost : example 01:54:23&gt; EXPLAIN SELECT A.* FROM A,B
+-&gt; WHERE A.c1 &gt; 2 AND A.c2 &lt; 5 AND A.c2 = B.c2 ORDER BY A.c2\G
+*************************** 1. row ***************************
+id: 1
+select_type: SIMPLE
+table: A
+type: range
+possible_keys: PRIMARY
+key: PRIMARY
+key_len: 4
+ref: NULL
+rows: 3
+Extra: Using where; Using filesort
+*************************** 2. row ***************************
+id: 1
+select_type: SIMPLE
+table: B
+type: ref
+possible_keys: B_c2_ind
+key: B_c2_ind
+key_len: 7
+ref: example.A.c2
+rows: 2
+Extra: Using where; Using index
+MySQL 从 Table A 中取出了符合条件的数据，由于取得的数据并不满足 ORDER BY 条件，所以 MySQL 进行了 filesort 操作，其整个执行过程如下图所示：
+
+
+
+在 MySQL 中，filesort 操作还有一个比较奇怪的限制，那就是其数据源必须是来源于一个 Table，所以，如果我们的排序数据如果是两个（或者更多个） Table 通过 Join所得出的，那么 MySQL 必须通过先创建一个临时表（Temporary Table），然后再将此临时表的数据进行排序，如下例所示：
+
+sky@localhost : example 02:46:15&gt; explain select A.* from A,B
+-&gt; where A.c1 &gt; 2 and A.c2 &lt; 5 and A.c2 = B.c2 order by B.c3\G
+*************************** 1. row ***************************
+id: 1
+select_type: SIMPLE
+table: A
+type: range
+possible_keys: PRIMARY
+key: PRIMARY
+key_len: 4
+ref: NULL
+rows: 3
+Extra: Using where; Using temporary; Using filesort
+*************************** 2. row ***************************
+id: 1
+select_type: SIMPLE
+table: B
+type: ref
+possible_keys: B_c2_ind
+key: B_c2_ind
+key_len: 7
+ref: example.A.c2
+rows: 2
+Extra: Using where
+这个执行计划的输出还是有点奇怪的，不知道为什么，MySQL Query Optimizer 将 “Using temporary” 过程显示在第一行对 Table A 的操作中，难道只是为让执行计划的输出少一行？
+
+实际执行过程应该是如下图所示：
+
+
+
+yejr Says @ 08-11-24 3:51 pm
+
+to xi2008wang，确切的说，应该是加大join_buffer，还有创建合适的索引，呵呵
+朝阳 Says @ 08-11-24 7:56 pm
+
+TO:yejr
+引用 “to xi2008wang，确切的说，应该是加大join_buffer，还有创建合适的索引，呵呵”
+是笔误吧，加大Join Buffer？ 加大Join Buffer 是为了解决哪一个环节呢？ 你是不是想表达的是加大 sort buffer啊？ 呵呵
+ruochen Says @ 09-01-9 10:59 am
+
+曾经就有同事的数据库出现大量的排序等待，造成系统负载很高，而且响应时间变得很长，最后查出正是因为 MySQL 使用了传统的第一种排序算法而导致，在加大了 max_length_for_sort_data 参数值之后，系统负载马上得到了大的缓解，响应也快了很多。
+能不能透漏下max_length_for_sort_data 在这个案例中从多大调到多大呀？
+叶总说的应该是sort buffer吧
+朝阳 Says @ 09-01-10 2:17 pm
+
+@ruochen
+偶估计也是说的”sort_buffer”，哈哈
+具体调整设置数据并没有详细了解，其实这个调整只能当一个思路一种方法来用，具体该调整到多大的值合适，还是要看具体的SQL语句的，其目标就是让SQL语句需要取出的内容的总长度小于max_length_for_sort_data参数值 :)
+weiwei Says @ 09-02-12 5:26 pm
+
+filesort还有一个read_rnd_buffer_size 参数，手册上说可以有优化，他是不是myisam中排序最大可比对的字符限制？
+朝阳 Says @ 09-02-12 8:42 pm
+
+@weiwei
+其实很多人和你一样，在这里的理解是有一个误区的，确实，read_rnd_buffer_size这个参数在一定情况下是对order by查询性能有一定的影响，但 read_rnd_buffer_size 实际的作用并不是针对order by的。
+准确的说，read_rnd_buffer_size参数只是一个在通过存储引擎读取数据的时候，当读取方式在磁盘上的扫描为离散的随机IO（针对于顺序的连续 IO）的时候所使用到的一个buffer空间。只不过因为当使用了order by 之后，在大部分情况下会发生离散的随机IO而已。
+
+
+
+
+
+
+
+
+ijibu Says @ 11-04-11 9:41 pm
+
+id为主键
+EXPLAIN SELECT `id` FROM `yidaicrm_mes_user` ORDER BY `id`; 将使用索引
+EXPLAIN SELECT `userid` FROM `yidaicrm_mes_user` ORDER BY `id`; 不使用索引
+EXPLAIN SELECT * FROM `yidaicrm_mes_user` ORDER BY `id`; 不使用索引
+EXPLAIN SELECT * FROM `yidaicrm_mes_user` ORDER BY `id` LIMIT 1000; 将使用索引
+请问博主能帮忙解释下嘛。
+朝阳 Says @ 11-04-27 11:53 am
+
+根据ID排序取ID，可以仅仅只通过索引完成排序，所以很自然的利用了索引；
+根据ID排序取UserID，这个SQL本身看上去实际意义有点奇怪。除开实际意义来说，如果走索引，本身性能可能更差，不走索引也是正常的
+取全表数据根据ID排序，走索引一定不如直接查，因为可以减少因为需要索引改变数据访问顺序造成随机IO的概率，数据库放弃索引是应该的
+最后一个仅仅只是取部分数据，根据统计信息，可能数据库认为在取少量数据的时候，虽然可能有很多随机IO，但是还是比全表查询一遍要快
+MySQL的优化器并不是一个RBO模式的优化器，和目前 Oracle的新优化器一样，是一个 CBO的优化器，所以是与数据的实际统计信息有关系的，而不是简单的规则
+
+
+
+
+
+
