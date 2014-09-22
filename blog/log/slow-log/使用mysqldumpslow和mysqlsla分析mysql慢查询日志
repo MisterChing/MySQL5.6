@@ -1,0 +1,56 @@
+MySQL优化不是一劳永逸的工作，而是一个持久战。其中慢查询日志的分析是一个重要手段，以前我总是手动大概看看，不过这实在不是长久之计，今天试用了一下mysqldumpslow和mysqlsla，感觉效率高多了。
+
+mysqldumpslow
+mysqldumpslow是官方提供的perl脚本，所以你也不用费劲巴拉的安装了，只要有mysql的环境基本就能用：
+mysqldumpslow -s c
+
+其中参数（-s c）的意思就是按照各种慢查询条数排序。不过mysqldumpslow有一个挺不爽的缺点，就是查询的结果只有一些抽象的SQL，没有可供实际运行的SQL例子。
+
+mysqldumpslow, mysql官方提供的慢查询日志分析工具. 输出图表如下:
+
+
+
+主要功能是, 统计不同慢sql的
+出现次数(Count),
+执行最长时间(Time),
+累计总耗费时间(Time),
+等待锁的时间(Lock),
+发送给客户端的行总数(Rows),
+扫描的行总数(Rows),
+用户以及sql语句本身(抽象了一下格式, 比如 limit 1, 20 用 limit N,N 表示).
+
+mysqlsla
+mysqlsla是 hackmysql.com推出的一款日志分析工具(该网站还维护了 mysqlreport, mysqlidxchk 等比较实用的mysql工具)
+整体来说, 功能非常强大. 数据报表,非常有利于分析慢查询的原因, 包括执行频率, 数据量, 查询消耗等.
+
+安装方法如下：
+tar zxf http://hackmysql.com/scripts/mysqlsla-2.03.tar.gz
+cd mysqlsla-2.03
+perl Makefile.PL
+make
+make install
+
+使用起来很简单：
+/path/to/mysqlsla slow.log
+
+
+
+格式说明如下:
+总查询次数 (queries total), 去重后的sql数量 (unique)
+输出报表的内容排序(sorted by)
+最重大的慢sql统计信息, 包括平均执行时间, 等待锁时间, 结果行的总数, 扫描的行总数.
+
+Count, sql的执行次数及占总的slow log数量的百分比.
+Time, 执行时间, 包括总时间, 平均时间, 最小, 最大时间, 时间占到总慢sql时间的百分比.
+95% of Time, 去除最快和最慢的sql, 覆盖率占95%的sql的执行时间.
+Lock Time, 等待锁的时间.
+95% of Lock , 95%的慢sql等待锁时间.
+Rows sent, 结果行统计数量, 包括平均, 最小, 最大数量.
+Rows examined, 扫描的行数量.
+Database, 属于哪个数据库
+Users, 哪个用户,IP, 占到所有用户执行的sql百分比
+
+Query abstract, 抽象后的sql语句
+Query sample, sql语句
+
+除了以上的输出, 官方还提供了很多定制化参数, 是一款不可多得的好工具.
