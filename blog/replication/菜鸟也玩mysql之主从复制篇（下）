@@ -1,0 +1,93 @@
+环境如下：
+单台数据库存有数据，要升级为主从复制的架构。
+主数据库：mysql-master：IP192.168.48.128，数据库正常提供服务，有数据。
+从数据库：mysql-slave：IP192.168.48.130，数据库正常提供服务，无数据。
+01
+升级大致步骤如下：
+1、修改主数据库配置文件，开启总从复制必要的功能。
+2、在主数据库中创建一个账号并授权给从数据库使用。
+3、导出主数据库中的数据作。
+4、修改从数据库配置文件，开启总从复制必要的功能。
+5、把刚才主数据库中导出的数据导入到从数据库。
+6、在从数据库中配置连接主数据库要用到的账户、密码等。
+7、启动主从复制功能，并检查是否正常复制。
+开始升级:
+在主数据库上操作：
+1)、确保/etc/my.cnf中有如下参数，没有的话需手工添加，并重启mysql服务。
+[mysqld]
+log-bin=mysql-bin 启动二进制文件
+server-id=1 服务器ID
+2)、登录mysql，在mysql中添加一个backup的账号，并授权给从服务器。
+[root@localhost ~]# mysql -uroot –p123456 登录mysql
+mysql> grant replication slave on *.* to 'backup'@'192.168.48.130' identified by 'backup'; 创建backup用户，并授权给192.168.48.130使用。
+02
+ 
+mysql> flush privileges;­ 刷新系统，使新加用户生效。
+3)、查看已有的数据库有哪些；
+mysql> show databases;
+02-1
+4)、进行锁表操作，不让数据进行写入动作，这么做事为了防止从数据库的原始数据和主数据库的原始数据不一致。
+mysql> flush tables with read lock;
+03
+5)、查询主数据库状态，并记下FILE及Position的值，这个在后面配置从服务器的时候要用到。
+mysql> show master status;
+04
+6)、切换一个终端，使用mysqldump命令将刚才查询到的两个库导出来。
+mysql> mysqldump –uroot –p123456 mysqltest > mysqltest.sql
+mysql> mysqldump –uroot –p123456 test1234 > test1234.sql
+05
+7)、将导出来的库文件传送到从数据库的/root目录下。
+[root@localhost ~]#scp mysqltest.sql test1234.sql root@192.168.48.130:/root/
+这中间需要输入一次验证口令。见下图
+06
+8)、切换回之前的终端，进行表解锁操作。
+mysql> unlock tables;
+07
+主数据库服务器上的操作告一段落。
+在从数据库上操作：
+1)、确保/etc/my.cnf中有log-bin=mysql-bin和server-id=1参数，并把server-id=1修改为server-id=10。修改之后如下所示：
+[mysqld]
+log-bin=mysql-bin 启动二进制文件
+server-id=10 服务器ID
+2)、重启mysql服务。
+[root@localhost ~]# mysqladmin -p123456 shutdown 
+[root@localhost ~]# mysqld_safe --user=mysql &
+08
+3)、登录数据库，确认要同步的库名不存在。
+[root@localhost ~]# mysql -uroot –p123456
+mysql> show databases;
+09
+4)、创建名为mysqltest和test1234的库。
+mysql> create database mysqltest;
+mysql> create database test1234;
+10
+4)、切换一个终端，将传过来的两个数据文件分别导入对应的数据库下。
+[root@localhost ~]# mysql -uroot –p123456 mysqltest < mysqltest.sql
+[root@localhost ~]# mysql -uroot –p123456 test1234 < test1234.sql
+11
+5)、切换回之前的终端，执行如下语句
+mysql> change master to master_host='192.168.48.128',master_user='backup',master_password='backup',master_log_file='mysql-bin.000003',master_log_pos=1650;
+12
+6)、启动主从复制功能。
+mysql> start slave;
+13
+7)、
+检查主从同步，如果您看到Slave_IO_Running和Slave_SQL_Running均为Yes，则主从复制连接正常。
+mysql> show slave status\G
+14
+验证主从是否正常配置：
+在主数据库上插入数据：
+mysql> show databases;
+mysql> show tables;
+mysql> use mysqltest;
+mysql> select * from user;
+mysql> insert into user values (4,'ergou');
+mysql> insert into user values (5,'sanwazi');
+16
+在从数据库上查看是否正常同步：
+mysql> show databases;
+mysql> use mysqltest;
+mysql> select * from user;
+17
+又上图可以看出，主从之间已经可以正常复制了。
+今天就先到这里吧O(∩_∩)O~
