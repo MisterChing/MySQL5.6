@@ -1,0 +1,6 @@
+在做MySQL复制的时候二进制日志最重要的选项sync_binlog,那么它到底有什么作用呢?
+
+
+sync_binlog=1 or N
+
+如果开启此选项,MySQL每次提交事务之前会将二进制同步到磁盘上,保证服务器崩溃时不会丢失事件,如果禁用此选项,服务器会少做一些工作,但二进制日志文件可能在服务器崩溃时损坏或丢失信息.如果备库不是那么重要,那么开启会带来额外的开销,它只适用于二进制日志,而非中继日志.所以强烈推荐设置sync_binlog全局变量(1是最安全的值，但也是最慢的).使binlog在每N次binlog写入后与硬盘同步.如果表使用InnoDB,MySQL服务器处理COMMIT语句,它将整个事务写入binlog并将事务提交到InnoDB中.如果在两次操作之间出现崩溃,重启时事务被InnoDB回滚,但仍然存在binlog中.可以用--innodb-safe-binlog选项来增加InnoDB表内容和binlog之间的一致性.MySQL5.1版本之后参数--innodb-safe-binlog作废.由于新引入了XA事务支持.该选项可以提供更大程度的安全,使每个事务的 binlog(sync_binlog =1)和(默认情况为真)InnoDB日志与硬盘同步,该选项的效果是崩溃后重启时,在滚回事务后,MySQL服务器从binlog剪切回滚的InnoDB事务.这样可以确保binlog反馈回InnoDB表的确切数据.并使从服务器保持与主服务器同步.
