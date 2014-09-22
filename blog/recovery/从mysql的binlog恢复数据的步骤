@@ -1,0 +1,156 @@
+前言
+
+最近有几次数据库的误操作，导致需要从binlog恢复数据，每次都google，搞掂之后又很快忘了。现在总结下来，方便下次快速操作。
+
+当你误操作了 bbs.comment 表之后，总的来说，有5个步骤去恢复。
+1. 确定binlog是否有开启
+2. 找到binlog位置
+3. 恢复最近一次备份的数据
+4. 用mysqlbinlog工具导出操作日志
+5. 把操作同步到comment
+
+实际操作
+
+1、确定binlog是否有开启
+
+如果明确知道了数据库已经开启了binlog，那么请看第3步。
+
+快速的判断数据库是否开启了binlog，在终端或者phpmyadmin中执行show variables like 'log_bin'。
+如果结果是ON，那就可以继续了。如果不幸的是OFF, 那么可以关掉这个文章了，因为你没有开启binlog，已经回天乏力了。
+如
+
+1
+2
+3
+4
+5
+6
+7
+8
+ 
+mysql> show variables like 'log_bin';
++---------------+-------+
+| Variable_name | Value |
++---------------+-------+
+| log_bin       | ON    |
++---------------+-------+
+ 
+2、 找到binlog位置
+
+查找binlog的位置，可以打开my.cnf，查找my.cnf中的两项配置log-bin和 datadir。
+
+log-bin可以指定全路径，也可以是相对路径
+- 全路径
+那么binlog就在该位置
+- 相对路径
+那么binlog的位置在 datadir的目录下，以log-bin为前缀的文件
+
+如
+
+1
+2
+3
+4
+ 
+log-bin=mysql-bin
+datadir=/data/mysql
+ 
+就可以在/data/mysql目录下，找到类似这样的文件
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+ 
+-rw-rw---- 1 mysql mysql 1.1G Apr  2 15:45 mysql-bin.000067
+-rw-rw---- 1 mysql mysql  27K Mar 28 13:48 mysql-bin.000068
+-rw-rw---- 1 mysql mysql 971K Mar 28 13:48 mysql-bin.000069
+-rw-rw---- 1 mysql mysql 1.1G Apr  2 15:55 mysql-bin.000070
+-rw-rw---- 1 mysql mysql 1.1G Apr  2 16:05 mysql-bin.000071
+-rw-rw---- 1 mysql mysql 1.1G Apr  2 16:15 mysql-bin.000072
+-rw-rw---- 1 mysql mysql 1.1G Apr  2 16:32 mysql-bin.000073
+-rw-rw---- 1 mysql mysql 960M Apr 26 17:51 mysql-bin.000074
+-rw-rw---- 1 mysql mysql 141K Apr 26 22:27 mysql-bin.index
+ 
+3、恢复上一次备份的数据
+
+找出服务器最近一次备份的数据，如有一个comment.bak.sql，用source的方式导入bak数据
+
+1
+2
+3
+ 
+mysql> source comment.bak.sql
+ 
+4、 用mysql自带工具mysqlbinlog导出操作日志
+
+比如最近一次备份的时间是 2014-04-25 00:00:00 ，那么就把从那个时间起，数据库的操作给导出。
+mysqlbinlog支持的几个参数
+- --database：需要导出的database的名字 （无法指定一个表的数据）
+- --start-date: 开始的时间
+- --stop-date: 结束的时间
+
+因为mysqlbinlog无法精确到一个表，只能是一整个数据库， 所有先导出整个库，在用grep提取出一个表的操作日志.
+
+4、1 导出数据库 (bbs)的操作日志
+
+把从2014-04-25 00:00::00 到 2014-04-26 9:25:00 (假设误操作的时间为4-26 09:25)， bbs这个库的所有的操作日志，导到bbs.sql文件去。
+
+1
+2
+3
+4
+5
+6
+ 
+/mysql/bin/mysqlbinlog --database=bbs --start-date="2014-04-25 00:00:00"  --stop-date="2014-04-26 9:00:00" /mysql/data/mysql-bin.000071 > bbs.sql
+ 
+//如果跨越了几个binlog，采用追加的方式，追加到bbs.sql
+/mysql/bin/mysqlbinlog --database=bbs --start-date="2014-04-25 00:00:00"  --stop-date="2014-04-26 9:00:00" /mysql/data/mysql-bin.000072 >> bbs.sql
+ 
+注:
+从start-date 到 stop-date 这段时间内，可能跨域好几个binlog， 我们可以通过binlog的最后修改时间，判断一共跨越了几个binlog。
+要是误删除跨越了好几个bin log， 找回数据的时候就必须一个个的bin log日志去找回了
+(当然，你也可以用mysql-bin.000194*的方式，模糊指定多个binlog文件)
+
+4、2 提取出一个表（comment) 的操作日志
+
+把上一步中，整个库的日志中grep出指定表的操作日志.
+
+1
+2
+3
+ 
+cat bbs.sql | grep 'comment' > comment.sql
+ 
+此时，comment.sql 就是存有从2014-04-25 00:00::00 到 2014-04-26 9:25:00这段时间的所有的操作log。
+
+5、 执行操作日志
+
+此时，只要把comment.sql的内容运行一下， comment的数据就恢复到误操作之前状态。
+记得，把comment.sql中误操作的那一个语句给删除，因为就是一个误操作的语句，不然刚才所做的一切，就成了无用功了。
+
+1
+2
+3
+4
+ 
+vim comment.sql 
+#找出误操作的语句，删掉， 然后再执行
+ 
+如 DROP TABLE BBS; 这样的误操作语句给删除掉, 然后再执行.
+
+1
+2
+3
+ 
+mysql> source comment.sql
+ 
+这样子之后，数据就恢复了。
