@@ -1,0 +1,31 @@
+In some cases, the server creates internal temporary tables while processing queries. Such a table can be held in memory and processed by the MEMORY storage engine, or stored on disk and processed by the MyISAM storage engine. The server may create a temporary table initially as an in-memory table, then convert it to an on-disk table if it becomes too large. Users have no direct control over when the server creates an internal temporary table or which storage engine the server uses to manage it.
+
+Temporary tables can be created under conditions such as these:
+
+UNION queries use temporary tables.
+
+Some views require temporary tables, such those evaluated using the TEMPTABLE algorithm, or that use UNION or aggregation.
+
+If there is an ORDER BY clause and a different GROUP BY clause, or if the ORDER BY or GROUP BY contains columns from tables other than the first table in the join queue, a temporary table is created.
+
+DISTINCT combined with ORDER BY may require a temporary table.
+
+If you use the SQL_SMALL_RESULT option, MySQL uses an in-memory temporary table, unless the query also contains elements (described later) that require on-disk storage.
+
+Multiple-table UPDATE statements.
+
+GROUP_CONCAT() or COUNT(DISTINCT) evaluation.
+
+To determine whether a query requires a temporary table, use EXPLAIN and check the Extra column to see whether it says Using temporary (see Section 8.8.1, “Optimizing Queries with EXPLAIN”).
+
+If an internal temporary table is created initially as an in-memory table but becomes too large, MySQL automatically converts it to an on-disk table. The maximum size for in-memory temporary tables is the minimum of the tmp_table_size and max_heap_table_size values. This differs from MEMORY tables explicitly created with CREATE TABLE: For such tables, only the max_heap_table_size system variable determines how large the table is permitted to grow and there is no conversion to on-disk format.
+
+When the server creates an internal temporary table (either in memory or on disk), it increments the Created_tmp_tables status variable. If the server creates the table on disk (either initially or by converting an in-memory table) it increments the Created_tmp_disk_tables status variable.
+
+Some conditions prevent the use of an in-memory temporary table, in which case the server uses an on-disk table instead:
+
+Presence of a BLOB or TEXT column in the table
+
+Presence of any string column in a GROUP BY or DISTINCT clause larger than 512 bytes
+
+Presence of any string column with a maximum length larger than 512 (bytes for binary strings, characters for nonbinary strings) in the SELECT list, if UNION or UNION ALL is used
