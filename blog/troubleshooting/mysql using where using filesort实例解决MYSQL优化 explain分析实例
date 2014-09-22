@@ -26,3 +26,4 @@ SELECT * FROM DB.TB WHERE ID=2000010000 AND FID IN (9,8,3,13,38,40) ORDER BY INV
 里面建立的索引为一个三列的多列索引：IDX（ID,FID ,INVERSE_DATE） 。INVERSE_DATE这个是时间的反向索引。
 对于这个sql我当时最开始认为应该是个优化好的状态，应该没有什么纰漏了，结果一explain才发现竟然出现了：Using where; Using filesort。
 汗。。。为什么呢，后来经过分析才得知，原来在多列索引在建立的时候是以B-树结构建立的，因此建立索引的时候是先建立ID的按顺序排的索引，在相同ID的情况下建立FID按 顺序排的索引，最后在FID 相同的情况下建立按INVERSE_DATE顺序排的索引，如果列数更多以此类推。有了这个理论依据我们可以看出在这个sql使用这个IDX索引的时候只是用在了order by之前，order by INVERSE_DATE 实际上是using filesort出来的。。汗死了。。因此如果我们要在优化一下这个sql就应该为它建立另一个索引IDX（ID,INVERSE_DATE），这样就消除了using filesort速度也会快很多。。问题终于解决了。。- -！ 
+
