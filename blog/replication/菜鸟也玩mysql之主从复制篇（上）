@@ -1,0 +1,62 @@
+在实际企业应用环境当中，单台mysql数据库是不足以满足日后业务需求的。譬如服务器发生故障，没有备份服务器来提供服务的话，业务就得停止。介于这种情况，我们来学习一下mysql主从复制。
+使用mysql主从复制的好处有：
+1、采用主从服务器这种架构，稳定性得以提升。如果主服务器发生故障，我们可以使用从服务器来提供服务。
+2、在主从服务器上分开处理用户的请求，可以提升数据处理效率。
+3、将主服务器上的数据复制到从服务器上，保护数据免受意外的损失。
+环境描述：
+新企业要搭建架构为主从复制的mysql数据库。
+主服务器（mysql-master）：IP地址：192.168.48.128，mysql已安装，没有用户数据。
+从服务器（mysql-slave）：IP地址：192.168.48.130，mysql已安装，没有用户数据。
+主从服务器均可正常提供服务。
+01
+主从复制配置如下：
+在主服务器上操作：
+1)、确保/etc/my.cnf中有如下参数，没有的话需手工添加，并重启mysql服务。
+       [mysqld]
+       log-bin=mysql-bin     启动二进制文件
+       server-id=1                 服务器ID
+2)、登录mysql，在mysql中添加一个backup的账号，并授权给从服务器。
+[root@localhost ~]# mysql -uroot –p123456         登录mysql
+mysql> grant replication slave on *.* to 'backup'@'192.168.48.130' identified by 'backup';     创建backup用户，并授权给192.168.48.130使用。
+02
+ 
+mysql> flush privileges;­   刷新系统，使新加用户生效。
+3)、查询主数据库状态，并记下FILE及Position的值，这个在后面配置从服务器的时候要用到。
+mysql> show master status; 
+03
+ 
+在从服务器上操作：
+1)、确保/etc/my.cnf中有log-bin=mysql-bin和server-id=1参数，并把server-id=1修改为server-id=10。修改之后如下所示：
+       [mysqld]
+       log-bin=mysql-bin    启动二进制文件
+       server-id=10              服务器ID
+2）、重启mysql服务。
+[root@localhost ~]# mysqladmin -p123456 shutdown 
+[root@localhost ~]# mysqld_safe --user=mysql &
+04
+3)、登录mysql，执行如下语句
+[root@localhost ~]# mysql -uroot –p123456
+mysql> change master to master_host='192.168.48.128',master_user='backup',master_password='backup',master_log_file='mysql-bin.000003',master_log_pos=401;
+05
+4)、启动slave同步。
+mysql> start slave;
+06
+5)、检查主从同步，如果您看到Slave_IO_Running和Slave_SQL_Running均为Yes，则主从复制连接正常。
+mysql> show slave status\G
+07
+验证配置是否正常，mysql主从能否正常复制。
+在主数据库上新建一个库，并且在库中写一个表和一些数据。
+[root@localhost ~]# mysql -uroot –p123456
+mysql> create database mysqltest;
+mysql> use mysqltest;
+mysql> create table user(id int(5),name char(10));
+mysql> insert into user values (00001,'zhangsan');
+08
+在从数据库中验证一下，是否正常复制到数据。
+[root@localhost ~]# mysql -uroot –p123456
+mysql> show databases;
+09
+mysql> select * from mysqltest.user;
+10
+从上图中的结果，我们可以看到mysql主从复制已经在起作用了，我们在主数据库中写入的数据已经复制到我们的从数据库中了。
+今天就先到这里，后续我会再写一篇菜鸟也玩mysql之主从复制篇（下），主要介绍如何把现有的单台mysql数据库环境改造为主从复制的环境。
