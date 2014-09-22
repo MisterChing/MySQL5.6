@@ -1,0 +1,81 @@
+Mysql的备份方式有:mysqldump、mysqlhotcopy、BACKUP TABLE 、SELECT INTO OUTFILE，又或者备份二进制日志（binlog），还可以是直接拷贝数据文件和相关的配置文件。MyISAM表是保存成文件的形式，因此相对比较容易备份，上面提到的几种方法都可以使用。Innodb 所有的表都保存在同一个数据文件 ibdata1中（也可能是多个文件，或者是独立的表空间文件），相对来说比较不好备份，免费的方案可以是拷贝数据文件、备份 binlog，或者用mysqldump。
+
+1.mysqldump备份
+mysqldump 是采用SQL级别的备份机制，它将数据表导成 SQL 脚本文件，在不同的 MySQL 版本之间升级时相对比较合适，这也是最常用的备份方法。
+
+示例:mysqldump -uroot -p database table > /home/jobs/back.sql
+
+mysqldump也可做增量备份,mysqldump相关参数网上较多,就不在此一一赘述了
+
+2.mysqlhotcopy备份
+mysqlhotcopy 是一个 PERL 程序。它使用 LOCK TABLES、FLUSH TABLES 和 cp 或 scp来快速备份数据库。它是备份数据库或单个表的最快的途径，但它只能运行在数据库文件（包括数据表定义文件、数据文件、索引文件）所在的机器上。
+mysqlhotcopy 只能用于备份 MyISAM，并且只能运行在 类Unix 和 NetWare 系统上。
+
+mysqlhotcopy 支持一次性拷贝多个数据库，同时还支持正则表达。
+
+示例：
+root#/usr/local/mysql/bin/mysqlhotcopy -h=localhost -u=root-p=123456 database /tmp
+(把数据库目录 database 拷贝到 /tmp下)
+root#/usr/local/mysql/bin/mysqlhotcopy -h=localhost -u=root -p=123456 db_name_1 … db_name_n /tmp
+root#/usr/local/mysql/bin/mysqlhotcopy -h=localhost -u=root -p=123456 db_name . /regex/ /tmp
+更详细的使用方法请查看手册，或者调用下面的命令来查看 mysqlhotcopy 的帮助：
+
+perldoc /usr/local/mysql/bin/mysqlhotcopy注意，想要使用 mysqlhotcopy，必须要有SELECT、RELOAD(要执行 FLUSH TABLES) 权限，并且还必须要能够有读取 datadir/db_name 目录的权限。
+
+还原mysqlhotcopy 备份出来的是整个数据库目录，使用时可以直接拷贝到 mysqld指定的 datadir (在这里是 /usr/local/mysql/data/)目录下即可，同时要注意权限的问题，如下例：
+root#cp -rf db_name /usr/local/mysql/data/
+root#chown -R mysql:sql /usr/local/mysql/data/
+(将 db_name 目录的属主改成 mysqld 运行用户)
+root#chmod 700 /usr/local/mysql/data
+root#chmod -fr 660 /usr/local/mysql/data/*
+
+3.SQL 语法备份
+3.1 备份BACKUP TABLE 语法其实和 mysqlhotcopy
+的工作原理差不多，都是锁表，然后拷贝数据文件。它能实现在线备份，但是效果不理想，因此不推荐使用。它只拷贝表结构文件和数据文件，不同时拷贝索引文件，因此恢复时比较慢。例子： BACK TABLE tbl_name TO ‘/tmp/db_name/’;注意，必须要有 FILE权限才能执行本SQL，并且目录 /tmp/db_name/ 必须能被 mysqld 用户可写，导出的文件不能覆盖已经存在的文件，以避免安全问题。
+
+恢复用 BACKUP TABLE 方法备份出来的文件，可以运行 RESTORE TABLE 语句来恢复数据表。例子： RESTORE TABLE FROM ‘/tmp/db_name/’;权限要求类似上面所述。
+
+3.2 SELECT INTO OUTFILE 则是把数据导出来成为普通的文本文件，可以自定义字段间隔的方式，方便处理这些数据。例子：
+SELECT INTO OUTFILE ‘/tmp/db_name/tbl_name.txt’ FROM tbl_name;
+注意，必须要有FILE 权限才能执行本SQL，并且文件 /tmp/db_name/tbl_name.txt 必须能被 mysqld用户可写，导出的文件不能覆盖已经存在的文件，以避免安全问题。
+
+用 SELECT INTO OUTFILE 方法备份出来的文件，可以运行 LOAD DATA INFILE 语句来恢复数据表。例子：
+LOADDATA INFILE ‘/tmp/db_name/tbl_name.txt’ INTO TABLE tbl_name;
+权限要求类似上面所述。倒入数据之前，数据表要已经存在才行。如果担心数据会发生重复，可以增加 REPLACE 关键字来替换已有记录或者用 IGNORE 关键字来忽略他们。
+
+4.启用二进制日志(binlog)
+采用 binlog 的方法相对来说更灵活，省心省力，而且还可以支持增量备份。
+启用 binlog 时必须要重启 mysqld。首先，关闭 mysqld，打开 my.cnf，加入以下几行：
+server-id = 1
+log-bin = binlog
+log-bin-index = binlog.index
+然后启动 mysqld 就可以了。运行过程中会产生 binlog.000001 以及 binlog.index，前面的文件是 mysqld记录所有对数据的更新操作，后面的文件则是所有 binlog 的索引，都不能轻易删除。关于 binlog 的信息请查看手册。
+
+需要备份时，可以先执行一下 SQL 语句，让 mysqld 终止对当前 binlog的写入，就可以把文件直接备份，这样的话就能达到增量备份的目的了： FLUSH LOGS;如果是备份复制系统中的从服务器，还应该备份
+master.info 和 relay-log.info 文件。
+
+备份出来的 binlog 文件可以用 MySQL 提供的工具 mysqlbinlog 来查看，如：
+/usr/local/mysql/bin/mysqlbinlog /tmp/binlog.000001
+该工具允许你显示指定的数据库下的所有SQL 语句，并且还可以限定时间范围，相当的方便，详细的请查看手册。
+
+恢复时，可以采用类似以下语句来做到：
+/usr/local/mysql/bin/mysqlbinlog /tmp/binlog.000001| mysql -uyejr -pyejr db_name
+把 mysqlbinlog 输出的 SQL 语句直接作为输入来执行它。
+
+如果你有空闲的机器，不妨采用这种方式来备份。由于作为 slave 的机器性能要求相对不是那么高，因此成本低，用低成本就能实现增量备份而且还能分担一部分数据查询压力，何乐而不为呢？
+
+5.拷贝文件
+直接备份数据文件相较前几种方法，备份数据文件最为直接、快速、方便，缺点是基本上不能实现增量备份。
+
+为了保证数据的一致性，需要在靠背文件前，执行以下 SQL 语句：
+FLUSH TABLES WITH READLOCK;
+也就是把内存中的数据都刷新到磁盘中，同时锁定数据表，以保证拷贝过程中不会有新的数据写入。这种方法备份出来的数据恢复也很简单，直接拷贝回原来的数据库目录下即可。
+
+注意，对于 Innodb 类型表来说，还需要备份其日志文件，即 ib_logfile* 文件。因为当 Innodb 表损坏时，就可以依靠这些日志文件来恢复。
+
+6.利用rsync备份
+rsync作为同步工具也可以用来做备份,但要配置服务器端和客户端
+
+示例rsync -vzrtopg –progress –delete root@192.168.1.3::root /tmp/
+
+缺点是rsync是根据文件修改时间做的增量备份,所以备份数据库都是全备,并且配置比较麻烦.
