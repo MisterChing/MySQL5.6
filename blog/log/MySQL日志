@@ -1,0 +1,120 @@
+在 MySQL 中有 4 种不同的日志, 分别为错误日志, 查询日志和慢查询日志, 二进制日志. 默认情况下, 为尽量减少 IO 损耗, 系统只打开错误日志. 若需要复制, 就必须要打开二进制日志.
+
+错误日志
+错误日志在 MySQL 数据库中很重要, 它记录着 MySQL 启动和停止, 以及服务器在运行过程中发生的任何错误的相关信息.
+
+配置
+如果配置文件 my.cnf 没有指定 log_eror, 则错问日志默认文件名为 hostname.err, 存放于 datadir 目录中.
+
+mysql> SHOW VARIABLES LIKE 'log_error';
++---------------+-------+
+| Variable_name | Value |
++---------------+-------+
+| log_error     |       |
++---------------+-------+
+1 row in set (0.00 sec)
+将 log-error 配置到 my.cnf 文件中
+
+[mysqld]
+log_error=/usr/local/mysql/var/mysql-error.err
+查询日志
+查询日志记录了所有操作的语句. 由于它记录数据库所有操作, 对于访问频繁的系统, 此种日志会造成性能影响, 所以一般不会将其打开.
+
+配置
+如果配置文件 my.cnf 有打开log选项, 但未指定具体文件名和路径, 则其默认文件名为 hostname.log, 存放于 datadir 目录中.
+
+默认时查询日志变量值
+
+mysql> SHOW VARIABLES LIKE 'log';
++---------------+-------+
+| Variable_name | Value |
++---------------+-------+
+| log           | OFF   |
++---------------+-------+
+1 row in set (0.00 sec)
+如果有需要使用到查询日志, 将 log 配置到 my.cnf 文件中
+
+[mysqld]
+log=/usr/local/mysql/var/mysql_query.log
+查询日志是纯文本格式, 可使用文本读取工具直接打开查看.
+
+慢查询日志
+慢查询日志是记录执行时间超过参数 slow_launch_time(unit: s, v5.1 默认 2s v5.0.* 是 long_query_time)所设定值的 SQL 语句日志. 它有助于发现性能有问题的 SQL.
+
+打开慢日志对系统性能的整体影响没有 binlog 那么大, 但系统需要计算每一条查询的执行时间, 所有, 在 CPU 方面还是有损耗的. 如果 CPU 资源不够, 可在大部分时候关闭这个, 只需间断性的打开来定位可能存在的慢查询.
+
+配置
+如果配置文件 my.cnf 有打开log_slow_queries选项, 但未指定具体文件名和路径, 则其默认文件名为 hostname-slow.log, 存放于 datadir 目录中.
+
+默认情况下慢日志查询变量(v5.1)：
+
+mysql> SHOW VARIABLES LIKE '%slow%';
++---------------------+----------------------------------+
+| Variable_name       | Value                            |
++---------------------+----------------------------------+
+| log_slow_queries    | OFF                              |
+| slow_launch_time    | 2                                |
+| slow_query_log      | OFF                              |
+| slow_query_log_file | /usr/local/mysql/var/db-slow.log |
++---------------------+----------------------------------+
+4 rows in set (0.00 sec)
+如果有需要使用到慢查询日志, 将 log_slow_queries 配置到 my.cnf 文件中
+
+[mysqld]
+log_slow_queries=/usr/local/mysql/var/mysql_slow_query.log
+也可以在启动 MySQL 服务时, 加上 –log_slow_queries=filename.log
+
+若需要进一步缩短慢查询时间限制, 可使用 Percona 提供的 microslow-patch(msl Patch). 它不仅能将时间减小到毫秒级别, 还能通过一些特定的规则来过滤记录的SQL, 如只记录某个表的慢查询.
+
+查看慢日志
+
+二进制日志
+二进制日志记录了所有的 DDL 和 DML 的语句, 但不包括查询语句, 语句以事件方式保存, 此日志对发生灾难时数据恢复极为重要. MySQL 复制时, 必须将其打开.
+
+启用配置
+
+[mysqld]
+log-bin=/usr/local/mysql/var/mysql-bin
+mysql-bin 为日志文件名，MySQL 在文件名后添加数字索引，所以该文件最后的形式类似于 mysql-bin.000001.如果在指定文件名时类似于 myql-bin.log, .log 会自动忽略. 该日志没有指定相对路径时，默认存放于 datadir 目录中.
+
+如下情况时，二进制日志会更换到新的文件:
+
+服务器重启
+服务器被更新
+日志达到最大日志长度 max_binlog_size
+在 MySQL 命令终端 FLUSH LOGS
+打开配置时各变量值(v5.1)
+
+mysql> SHOW VARIABLES LIKE '%bin%';
++-----------------------------------------+----------------------+
+| Variable_name                           | Value                |
++-----------------------------------------+----------------------+
+| binlog_cache_size                       | 32768                |
+| binlog_direct_non_transactional_updates | OFF                  |
+| binlog_format                           | STATEMENT            |
+| binlog_stmt_cache_size                  | 32768                |
+| innodb_locks_unsafe_for_binlog          | OFF                  |
+| log_bin                                 | ON                   |
+| log_bin_trust_function_creators         | OFF                  |
+| max_binlog_cache_size                   | 18446744073709547520 |
+| max_binlog_size                         | 1073741824           |
+| max_binlog_stmt_cache_size              | 18446744073709547520 |
+| sql_log_bin                             | ON                   |
+| sync_binlog                             | 0                    |
++-----------------------------------------+----------------------+
+12 rows in set (0.00 sec)
+部分变量值说明
+
+binlog_cache_size 事务过程中容纳二进制日志 SQL 语句的缓存大小. 二进制日志缓存是服务器支持事务存储引擎, 且服务器启用了二进制日志(log_bin)的前提下为每个客户端分配的内存, 注意是给每个客户端可以分配设置大小的 binlog cache 空间. 如果系统中会出现多语句的事务, 增加该值的大小, 以得到更好的性能.
+max_binlog_cache_size 和binlog_cache_size对应, 它代表的是 binlog 能使用的最大 cache 值大小. 当不够大时, 系统可能会报“Multi_statement transaction required more than ‘max_binlog_cache_size’ bytes of storage”.
+max_binlog_size binlog 最大值, 一般设置为 512KB 或 1GB, 但不能超过 1GB.
+sync_binlog影响到 binlog 对 MySQL 所带来的性能消耗, 还影响到数据的完整性, 参数说明如下:
+sync_binlog=0 事务提交后, 仅仅是将 binlog_cache 中的数据写入到 binlog 文件中, 但不执行 fsync 之类的磁盘操作指令通知文件系统将缓存刷新到磁盘, 而让文件系统自行决定什么时候来同步. sync_binlog=N 进行 N 次事务提交后, 系统将执行一次 fsync 之类的磁盘同步指令, 通知文件系统将 binlog 文件的缓存刷新到磁盘. 默认是 sync_binlog=0, 性能是最好, 但是风险是最大, 因为一旦系统 crash, 文件系统缓存中的 binlog 将都会丢失.设置为 1 时, 最安全但性能损耗最大, 当系统 crash 时, 最多只会丢失 binlog_cache 中未完成的一个事务, 对实际数据没有任何的影响.sync_binlog=0 性能 有可能是 sync_binlog=1 时的5倍.
+记录内容配置
+binlog_do_db=example1,example2	设定那些 db 需要记录binlog
+binlog_ignore_db=test1,test2	设定那些 db不要记录 binlog
+
+注:
+如果在操作数据库之前，不使用use $dbname , 那么所有的SQL都不会记录, 如果使用了use $dbname,那么判断规则取决于这里的$dbname，而不是 SQL 中操作的库.
+
+如果配置文件中没有配置这两个选项，则该主机上所有库的 DML 和 DLL 语句都会被记录。
