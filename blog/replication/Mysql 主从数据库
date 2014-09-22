@@ -1,0 +1,93 @@
+MYSQL主从数据库同步备份配置
+一、准备
+用两台服务器做测试：
+Master Server: 172.16.0.180/Linux/MYSQL 5.1.41
+Slave Server: 172.16.0.181/Linux/MYSQL 5.1.41
+
+做主从服务器的原则是，MYSQL版本要相同，如果不能满足，最起码从服务器的MYSQL的版本必须高于主服务器的MYSQL版本
+
+二、配置master服务器
+1. 登录Master服务器，编辑my.cnf
+#vim /etc/my.cnf
+在[mysqld]段添加以下内容：
+
+[mysqld]
+log-bin=mysql-bin
+server-id=1
+binlog-do-db=wordpress
+binlog-ignore-db=mysql,test
+
+解释：log-bin项是让Master服务器记录二进制日志这个是必须的；
+server-id=master_id 其中master_id必须为1到232–1之间的一个正整数值;
+binlog-do-db=database 是要记录日志的数据库；
+binlog-ignore-db 是不要记录日志的数据库名，多个数据库中间用逗号(,)隔开；
+
+2.从master服务器添加要从slave服务器访问master服务器的有权限的帐号，看下面命令就知道了：
+
+mysql> GRANT REPLICATION SLAVE ON *.* TO backup@172.16.0.181 IDENTIFIED BY ‘backuppassword’;
+
+格式：mysql> GRANT REPLICATION SLAVE ON *.*
+-> TO ‘帐号’@'从服务器IP或主机名’ IDENTIFIED BY ‘密码’;
+(说明：ubuntu系统先要开启数据库远程连接配置)
+3. 重起Mysql
+
+4. 备份master数据库数据
+
+# mysqldump –master-data extmail > extmail_backup_20071120.sql
+
+要加–master-data 选项，这里备份master服务器的数据，后面要导入slave服务器。
+
+5. 察看Master状态
+
+mysql> show master status;
++——————+———-+————–+——————+
+| File             | Position | Binlog_Do_DB | Binlog_Ignore_DB |
++——————+———-+————–+——————+
+| mysql-bin.000002 |       79 | extmail      | mysql,test       |
++——————+———-+————–+——————+
+1 row in set (0.00 sec)
+
+三、配置slave服务器
+1. 编辑my.cnf
+# vim /etc/my.cnf
+
+在[mysqld]段添加以下内容：
+
+server-id=2
+master-host=172.16.0.180
+master-port=3306
+master-user=backup
+master-password=backuppassword
+master-connect-retry=60
+
+解释:
+slave服务器的server-id不能与master相同，多台slave之间server-id也不能相同。
+master-host 是 master服务器的主机名或者IP地址
+master-user和master-password是前面我们在master上建用户名和密码
+master-connect-retry 是如果从服务器发现主服务器断掉，重新连接的时间差
+
+2. 把从主数据库服务器备份出来的数据库导入到从服务器中,也就是我们前面的extmail_backup_20071120.sql
+
+# mysqladmin create extmail
+# mysql extmail < extmail_backup_20071120.sql
+
+3. 重起mysql服务器
+4. 停止slave服务，设置主服务器的各种参数
+
+mysql> slave stop;
+mysql> change master to MASTER_HOST=’172.16.0.180′, MASTER_USER=’backup’, MASTER_PASSWORD=’backuppassword’, MASTER_LOG_FILE=’mysql-bin.000003′,MASTER_LOG_POS=106;
+mysql> slave start;
+
+5. 查看主从服务器的状态
+在主机A中，mysql>show master status\G;
+在从机B中，mysql>show slave status\G;
+
+确如如下行一致:
+Waiting for master to send event
+Slave_IO_Running: Yes
+Slave_SQL_Running: Yes
+
+++如果你想使用复制数据文件的方式来备份数据库
+只要在从服务器上的mysql命令行先键入slave stop;
+然后复制数据库文件，复制好了，再在mysql命令行键入slave start;
+启动从服务器，这样就即备份了数据有保证了数据完整性，而且整个过程中主服务器的mysql无需停止。
