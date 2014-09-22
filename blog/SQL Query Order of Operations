@@ -1,0 +1,59 @@
+Lately, I have been looking into SQL query optimization. We recently installed SeeFusion on our server and I can see where my long running tasks are causing the server to slow down. Turns out, not suprisingly, that the slow pages are very query-intense. Granted, a lot of these pages were pages years ago before I knew what nice code looked like, but the good news it, lots of room for optimization and clean up.
+
+To start out, I thought it would be good to look up the order in which SQL directives get executed as this will change the way I can optimize:
+
+FROM clause
+WHERE clause
+GROUP BY clause
+HAVING clause
+SELECT clause
+ORDER BY clause
+This order holds some very interesting pros/cons:
+
+FROM Clause
+
+Since this clause executes first, it is our first opportunity to narrow down possible record set sizes. This is why I put as many of my ON rules (for joins) as possible in this area as opposed to in the WHERE clause:
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+FROM
+    contact c
+INNER JOIN
+    display_status d
+ON
+    (
+            c.display_status_id = d.id
+        AND
+            d.is_active = 1
+        AND
+            d.is_viewable = 1 
+    )
+view rawcode-1.sql hosted with ❤ by GitHub
+This way, by the time we get to the WHERE clause, we will have already excluded rows where is_active and is_viewable do not equal 1.
+
+WHERE Clause
+
+With the WHERE clause coming second, it becomes obvious why so many people get confused as to why their SELECT columns are not referencable in the WHERE clause. If you create a column in the SELECT directive:
+
+1
+2
+SELECT
+    ( 'foo' ) AS bar
+view rawcode-2.sql hosted with ❤ by GitHub
+It will not be available in the WHERE clause because the SELECT clause has not even been executed at the time the WHERE clause is being run.
+
+ORDER BY Clause
+
+It might confuse people that their calculated SELECT columns (see above) are not available in the WHERE clause, but they ARE available in the ORDER BY clause, but this makes perfect sense. Because the SELECT clause executed right before hand, everything from the SELECT should be available at the time of ORDER BY execution.
+
+I am sure there are other implications based on the SQL clause order of operations, but these are the most obvious to me and can help people really figure out where to tweak their code.
