@@ -1,0 +1,139 @@
+mysql的主从复制replication：主从mysql服务器的数据同步
+ 
+       一个主服务器可以有多个从服务器，反之不可
+       异步的：更新数据时不管从服务器是否在同步数据，只负责本身的数据的更新
+       半同步：
+       过滤功能
+mysql复制类型：
+       基于语句的复制:只记录语句改变的
+       基于行row的复制：5.1版本后提供，记录改变的结果的
+       混合的mixed：由mysql本身自动判断用基于语句的还是基于行的
+ 
+复制过程的线程：
+       binlog dump线程：主服务器的
+       I/O thread 从服务器的 ，从主服务器的binlog 中读取数据
+       SQL thread 从服务器的：有顺序的执行
+       主服务器将更新数据的结果保存至二进制日志里
+       从服务器将主服务器的二进制日志的内容复制到本机的relay log中
+       从服务器从relay log读取数据更新新语句并应用到本机
+ 
+复制的优点：
+       备份
+       负载均衡
+       类似高可用功能
+       故障转移的
+       测试mysql的升级
+主服务器在每个事务在更新数据之前会把改变的数据保存在它的binary log里
+ 
+主从复制配置：
+       主服务器：
+            vim /etc/my.cnf
+              log-bin=master-bin 修改 启用二进制日志
+              log-bin-index=master-bin.index 添加 ，索引文件名的定义
+              server-id=1 标识服务器的id
+             service mysqld restart
+             mysql> grant replication slave, replication client on *.* to repl@'192.168.0.%' identified by '123456'
+                   flush privileges
+            
+       从服务器：
+            vim /etc/my.cnf
+               server-id       = 2
+              relay-log = slave-relay-bin
+              relay-log-index = slave-relay-bin.index
+            service mysqld restart
+            mysql>  change master to
+                >  master_host='192.168.0.169',
+                >  master_port=3306,
+                >  master_user='repl',
+                >  master_passwoed='123456',
+                >  master_log_file='master-bin.000002',
+                >  master_log_pos=106;
+            mysql> start slave
+ 
+在主服务器已经运行很长时间时以插入的方式创建从服务器：
+       主服务器上配置：
+             
+              flush tables with read lock;
+              flush logs;
+       备份数据库 mysqldump -uroot --all-databases -events --routines --   triggers --master-data=2 >/root/mysql.sql
+              查看备份文件的master_log_file二进制文件位置
+              unlock tables;
+              scp /root/mysql.sql 192.168.0.129:/root
+       从服务器配置：
+              mysql -uroot < /root/mysql.sql
+              进入mysql查看导入内容
+              change master to
+              master_host='192.168.0.169',
+              master_port=3306,
+              master_user='repl',
+              master_password='123546',
+              master_log_file='master-bin.000002', 与备份文件的二进制文件位置保持一致
+              master_log_pos=106;
+              start slave;
+             
+             
+ 
+主从服务器数据库的过滤：
+binlog-do-db   变化记录在二进制文件中 可以复制
+binlog-ifnore-db 变化不记录在二进制文件中
+              一般在从服务器上配置
+从服务器上参数：
+replicate-do-db 仅复制某些数据库
+replicate-ignore-db 不允许复制
+replicate-do-table = table复制某些表
+replicate-wild-do-table = db.table复制某数据库的某些表
+replicate-ignore-table = table
+replicate-wild-do-table = db.table
+replicate-wild-ignore-table = db.table
+       在主服务器上进行配置：一般不建议在主服务器上配置 会导致备份的时间点备份出问题
+                     从服务器停掉slave---stop slave
+                     vim /etc/my.cnf
+                       binlog-do-db = mydb 只允许从服务器复制mydb数据库
+                     service mysqld restart
+                 测试：从服务器开启start slave
+                     在主服务去对mydb修改和其他不允许从复制的数据库上修改
+                     在从服务器上只会同步mydb的数据
+      在从服务器上配置：
+             mysql中 stop slave
+              service mysqld stop
+              vim /etc/ny.cnf
+               [mysqld] 添加  仅复制mydb 、class数据库 其他不复制
+                 replicate-do-db = mydb
+                 replicate-do-db = class 参数可出现多次      
+               service mysqld restart
+              测试：show slave status 查看是否启动 I/O SQL线程
+                     start slave 若没有开启
+                    可在主服务器进行相关修改
+ 
+ 
+主从的数据加密认证：
+              vim /etc/my.cnf
+              ssl  添加在[mysqld]中 ，主从都要配置
+              service mysqld restart
+              show global variables like '%ssl%'; mysql查看为yes
+       主服务器做CA证书 分别再给主从发证
+              vim /etc/my.cnf
+                ssl-ca = /etc/mysql/certs/cacert.pem
+                ssl-cert = /etc/mysql/certs/mysqld_cert.pem
+                ssl-key = /etc/mysql/certs/mysqld_key.pem
+               service mysqld restart
+              连接mysql
+              show master status\G;
+              show global variables like '%ssl%';
+              grant user on *.* to repl@'192.168.0.%' require ssl;
+              grant replication slave, replication client on *.* to repl@'%.exampel.com' identified by '123456'
+              flush privileges;    
+              vim /etc/hosts 添加主从主机名
+       从服务器：进入mysql
+              stop slave
+              change master to
+              master_host='master.example.com'
+              MASTER_USER='repl',
+                  MASTER_PASSWORD='123456';      
+              master_ssl=1 启用ssl
+              master_ssl-ca = /etc/mysql/certs/cacert.pem 
+              master_ssl-cert = /etc/mysql/certs/mysqld_cert.pem
+              master_ssl-key = /etc/mysql/certs/mysqld_key.pem
+              start slave      
+              show slave status\G
+       测试：修改相关数据库数据进行测试 和过滤结合测试
