@@ -1,0 +1,99 @@
+以下的文章主要介绍的是MySQL 查询缓存的实际应用代码以及查看MySQL 查询缓存的大小 ，碎片整理，清除缓存以及监视MySQL 查询缓存性能的相关内容的描述，以下就是具体内容的描述，希望在你今后的学习中会有所帮助。
+
+MySQL> select @@query_cache_type;  
++--------------------+  
+| @@query_cache_type |  
++--------------------+  
+| ON |   
++--------------------+  
+MySQL> set query_cache_type=off;  
+MySQL> set query_cache_type=on;  
+MySQL>   
+MySQL> select sql_cache id, title, body from article;  
+MySQL> select sql_no_cache id, title, body from article;  
+MySQL> show variables like 'have_query_cache';  
++------------------+-------+  
+| Variable_name | Value |  
++------------------+-------+  
+| have_query_cache | YES |   
++------------------+-------+  
+1 row in set (0.00 sec)  
+查看MySQL 查询缓存的大小
+
+MySQL> select @@global.query_cache_size;  
++---------------------------+  
+| @@global.query_cache_size |  
++---------------------------+  
+| 16777216 |   
++---------------------------+  
+1 row in set (0.00 sec)  
+MySQL> select @@query_cache_size;  
++--------------------+  
+| @@query_cache_size |  
++--------------------+  
+| 16777216 |   
++--------------------+  
+1 row in set (0.00 sec)   
+查看最大缓存结果，如果结果集大于该数，不缓存。
+
+MySQL> select @@global.query_cache_limit;  
++----------------------------+  
+| @@global.query_cache_limit |  
++----------------------------+  
+| 1048576 |   
++----------------------------+  
+1 row in set (0.00 sec) 
+碎片整理
+
+MySQL> flush query cache  
+-> ;  
+Query OK, 0 rows affected (0.00 sec)  
+清除缓存
+
+MySQL> reset query cache  
+-> ;  
+Query OK, 0 rows affected (0.00 sec) 
+监视MySQL 查询缓存性能：
+
+MySQL> flush tables;  
+Query OK, 0 rows affected (0.04 sec)  
+MySQL> show status like 'qcache%';  
++-------------------------+----------+  
+| Variable_name | Value |  
++-------------------------+----------+  
+| Qcache_free_blocks | 1 |   
+| Qcache_free_memory | 16768408 |   
+| Qcache_hits | 6 |   
+| Qcache_inserts | 36 |   
+| Qcache_lowmem_prunes | 0 |   
+| Qcache_not_cached | 86 |   
+| Qcache_queries_in_cache | 0 |   
+| Qcache_total_blocks | 1 |   
++-------------------------+----------+  
+8 rows in set (0.06 sec)  
+看看当前缓存中有多少条信息：
+
+MySQL> show status like 'qcache_q%';  
++-------------------------+-------+  
+| Variable_name | Value |  
++-------------------------+-------+  
+| Qcache_queries_in_cache | 0 |   
++-------------------------+-------+  
+1 row in set (0.00 sec)  
+MySQL> select sql_cache id, title, body from article;  
+MySQL> show status like 'qcache_q%';  
++-------------------------+-------+  
+| Variable_name | Value |  
++-------------------------+-------+  
+| Qcache_queries_in_cache | 1 |   
++-------------------------+-------+  
+1 row in set (0.00 sec)  
+MySQL> show status like 'qcache_f%';  
++--------------------+----------+  
+| Variable_name | Value |  
++--------------------+----------+  
+| Qcache_free_blocks | 1 |   
+| Qcache_free_memory | 16766728 |   
++--------------------+----------+  
+2 rows in set (0.00 sec)  
+以上的相关内容就是对MySQL 查询缓存的介绍，望你能有所收获。
