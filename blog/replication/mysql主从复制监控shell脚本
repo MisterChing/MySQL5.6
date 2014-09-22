@@ -1,0 +1,27 @@
+########本脚本应用在生产环境中，是运用mysql主从的基础上########
+vi mysqlm-s.sh 
+#!/bin/bash
+ip=`ifconfig eth0|sed -n 2p|awk  '{ print $2 }'|awk -F : '{ print $2 }'`
+port=`netstat -anl|grep 3306 |sed -n '1p' |awk '{print $4}'|awk -F: '{ print $2}'`
+array=($(mysql -uUSER -pPASSWD  -e "show slave status\G"|grep "Running" |awk '{print $2}'))
+if [ "$port" == "3306" ]
+   then
+     if [ "${array[0]}" == "Yes" ] || [ "${array[1]}" == "Yes" ] 
+          then 
+            echo "slave is OK" 
+       else 
+            /home/shell/sendEmail/sendEmail -f  XXX@XXX -t XXX@XXX -s smtp.XXX -u "mysql主从复制出错" -xu user -xp passwd -m "${ip}:slave is error"
+    fi
+else
+   /home/shell/sendEmail/sendEmail -f  XXX@XXX -t XXX@XXX -s smtp.XXX -u "mysql停止运行" -xu user -xp passwd -m "${ip}:mysql is shutdown and slave error"
+    
+fi
+###########################简单说明###################################
+$ip   是获取本机IP
+$port 是判断mysql服务是否正常运行
+$array 是数组，$array[0] 是数组里的第一个参数，$array[1]是数组里的第二个参数
+if ...then.....fi   根据获取参数来判断达到监控
+${ip}:mysql is shutdown and slave error  ##注意因为mysql不正常运行，故主从复制出故障
+#######################################################################
+最后给予可执行权限给脚本，使用crontab -e ,每十五分钟运行一次
+*/15 * * * *  /home/shell/mysqm-s.sh
