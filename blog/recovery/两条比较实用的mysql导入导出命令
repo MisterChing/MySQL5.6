@@ -1,0 +1,17 @@
+开发lamp程序，对mysql数据库的导入导出是经常的事情，我就遇到这个问题，不能很方便的将数据库导入导出。今天整理了两条比较实用的命令，轻松搞定导入导出问题。
+
+首先是导出命令
+1.导出数据库
+mysqldump db_name -uroot -p > /path/db_name.sql
+2.导出数据库中某个表
+mysqldump db_name tb_name -uroot -p > /path/db_tb_name.sql
+
+再次是导入命令
+1.导入刚才备份的数据库sql文件
+mysql db_name -uroot -p < /path/db_tb_name.sql
+
+如果你是服务器操作，再现上两条命令
+打包数据库备份文件，对文件压缩了，再进行传输
+tar zcvf db_name.sql.tar.gz db_name.sql
+传输到指定机器后，再解包
+tar zxvf db_name.sql.tar.gz
