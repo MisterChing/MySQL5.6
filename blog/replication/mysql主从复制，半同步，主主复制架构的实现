@@ -1,0 +1,366 @@
+mysql的数据同步功能，不仅在一定程度上提供数据库查询时的负载均衡，而且为实现数据库的冗灾、备份、恢复、负载均衡等都是有极大帮助。而数据的同步功能可以通过主从复制来实现，而主从复制是异步进行的，并且mysql仅支持一主多从，不支持一从多主的复制模型。
+ 
+1，主从复制的原理：（如下图）
+ 
+第一步：在每个更新数据的事物完成之前，主服务器都会把数据更改记录到二进制日志中。即使事物在执行期间是交错的，mysql也会串行地把事物写入到二进制日志中，写入完成之后，主服务器告诉存储引擎调交事物。
+第二步：从服务器把主服务器的二进制日志拷贝到自己的硬盘，即"中继日志"中。首先，它启动一个工作线程，叫I/O从线程。这个I/O线程开启一个普通的客户端连接，然后启动一个特殊的二进制日志存储进程(binlog dump)进程。这个转储进程从主服务器的二进制日志中读取事件，它不会对事物进行轮询。如果它跟上了主服务器，就会进入休眠状态，并等待有新的事件发生时主服务器发出的信号，I/O线程把事件写入到从服务器的中继日志中。
+第三步：SQL从线程读取中继日志，并且重放其中的事件，然后更新从服务器的数据。由于这个进程能跟上I/O线程，中继日志通常都在操作系统的缓存中，所有中继日志的开销很低。SQL从线程执行的事件也可以被写入从服务器自己的二进制日志中或是不写。
+ 
+
+ 
+本文的应用环境为：
+redhat enterprise 5.4+mysql-5.5.20
+ 
+主服务器：
+ip地址：172.16.30.5
+hostname：master.magedu.com
+ 
+从服务器：
+ip地址：172.16.30.6
+hostname：slave.magedu.com
+ 
+本文主讲：
+一，安装mysql服务器
+二，主从复制架构的实现（两种应用场景）
+三，主从半同步的实现
+四，主从服务器推荐的设置
+五，主主复制架构的实现
+ 
+ 
+一，安装mysql服务器（在我们的主从服务器上都要这么安装）：
+1，首先下载平台对应的mysql绿色版本至本地，这里是32位平台:
+mysql-5.5.20-linux2.6-i686.tar.gz
+ 
+2、新建用户以安全方式运行mysqld进程：
+ 
+# groupadd -r mysql
+# useradd -g mysql -r -s /sbin/nologin -M  mysql
+# mkdir -p /mydata/data
+# chown -R mysql:mysql /mydata/data
+ 
+3、安装并初始化mysql-5.5.20
+ 
+# tar xf mysql-5.5.20-linux2.6-i686.tar.gz -C /usr/local
+# cd /usr/local/
+# ln -sv mysql-5.5.20-linux2.6-i686  mysql
+# cd mysql 
+ 
+# chown -R mysql:mysql  .
+ 
+初始化mysql数据库，指定以mysql用户身份运行，数据库数据存放在/mydata/data中，初始化后，mysql的root用户默认密码为空：
+# scripts/mysql_install_db --user=mysql --datadir=/mydata/data
+ 
+# chown -R root  .
+ 
+4、为mysql提供主配置文件：
+ 
+# cd /usr/local/mysql
+# cp support-files/my-large.cnf  /etc/my.cnf
+ 
+#vim /etc/my.cnf
+并修改此文件中thread_concurrency的值为你的CPU个数乘以2，比如这里使用如下行：
+thread_concurrency = 2
+ 
+另外还需要添加如下行指定mysql数据文件的存放位置：
+datadir = /mydata/data
+ 
+5、为mysql提供sysv服务脚本,是其能用service命令控制器启动：
+ 
+# cd /usr/local/mysql
+# cp support-files/mysql.server  /etc/rc.d/init.d/mysqld
+ 
+添加至服务列表：
+# chkconfig --add mysqld
+# chkconfig mysqld on
+ 
+启动mysql服务：
+#service mysqld start
+ 
+为了使用mysql的安装符合系统使用规范，并将其开发组件导出给系统使用，这里还需要进行如下步骤：
+6、输出mysql的man手册至man命令的查找路径：
+ 
+#vim /etc/man.config，添加如下行即可：
+MANPATH  /usr/local/mysql/man
+ 
+7、输出mysql的头文件至系统头文件路径/usr/include：
+ 
+这可以通过简单的创建链接实现：
+# ln -sv /usr/local/mysql/include  /usr/include/mysql
+ 
+8、输出mysql的库文件给系统库查找路径：
+ 
+# echo '/usr/local/mysql/lib' > /etc/ld.so.conf.d/mysql.conf
+ 
+而后让系统重新载入系统库：
+# ldconfig
+ 
+9、修改PATH环境变量，让系统可以直接使用mysql的相关命令：
+vim /etc/profile
+PATH=$PATH:/usr/local/mysql/bin
+ 
+二，主从复制架构的实现
+注意：我们从服务器的版本要和主服务器的版本相同或高与主服务器的版本
+ 
+第一种情况：
+当我们的主服务器和从服务器都是新的，主服务器中并没有数据。
+ 
+主服务器上的配置：
+1，查看二进制日志的状态，开启二进制日志
+mysql> show variables like 'log_bin';
++---------------+-------+
+| Variable_name | Value |
++---------------+-------+
+| log_bin       | ON    |
++---------------+-------+
+如果没有上面显示的off状态，则：
+#vim /etc/my.cnf：
+在[mysqld]的配置中，添加如下行：
+log-bin=mysql-bin
+ 
+2,更改mysql服务器的server id：
+#vim /etc/my.cnf
+在[mysqld]的配置中修改：
+server-id = 1
+ 
+重启mysql服务器使生效：
+#service mysqld restart
+ 
+3，建立仅限slave主机使用的专门用于进行复制数据的用户：
+mysql> grant replication client,replication slave on *.* to repl@'172.16.30.6' identified by '123456';
+ 
+刷新授权表，使账户立即生效：
+mysql> flush privileges;
+ 
+4，清空日志：
+mysql> flush master;
+ 
+ 
+从服务器的配置：
+1,开启中继日志：
+我们也可以关闭中继日志，由于我们的从服务器不需要时间点回复等功能，故可以关闭，减少资源浪费。但是，中继日志是必须开启的。
+#vim /etc/my.cnf
+在[mysqld]的配置中注释掉如下行：
+log-bin=mysql-bin
+在[mysqld]的配置中添加如下行：
+relay-log=relay-bin
+ 
+2，修改server id：
+server id标识一台mysql服务器，为了避免循环复制，主从服务器的server id必须不同
+#vim /etc/my.cnf
+在[mysqld]的配置中修改:
+server-id = 11
+ 
+重启服务器：
+# service mysqld restart
+ 
+3,指定主服务器:
+这里指定的要和在主服务器上建立的用户相同：
+mysql> change master to master_host='172.16.30.5',master_user='repl',master_password='123456';
+ 
+4，启动从服务器进程并查看运行状态;
+mysql> start slave;
+mysql> show slave status\G
+如果出现如下行，则表明正常启动
+Slave_IO_Running: Yes
+Slave_SQL_Running: Yes
+ 
+好了，这样我们的主从服务器就搭建好了。而通常生产情况下，我们是在正在使用的mysql服务器上做从服务器，这就是我们的第二种情况。
+ 
+第二种情况：
+为正在使用的mysql服务器做从服务器。
+ 
+主服务器上的配置：
+1，查看二进制日志的状态，开启二进制日志
+2,更改mysql服务器的server id
+3，建立仅限slave主机使用的专门用于进行复制数据的用户
+（以上三个步骤，同第一种情况的操作）
+ 
+4，备份mysql数据库中的数据：
+由于我们的mysql服务器处于工作状态，并且数据量通常是非常大的，故我们选择使用热备份，不耽误服务器提供服务，而备份之后可以直接在从服务器上导入。
+ 
+安装好我们的备份工具Xtrabackup,其最新版的软件可从 http://www.percona.com/software/percona-xtrabackup/ 获得（具体的介绍使用，请看我的博客”mysql数据库的备份与还原“）
+我们首先建立一个目录，用于存放备份的数据：
+#mkdir /backup
+ 
+安装xtrabackup工具：
+# rpm -ivh percona-xtrabackup-2.0.0-417.rhel5.i386.rpm  --nodeps
+ 
+完全备份：
+# innobackupex --user=DBUSER --password=DBUSERPASS /backup
+ 
+# ls /backup (会生成一个时间戳的目录，里面就是备份的数据文件)
+2012-03-18_10-58-22
+ 
+准备完全备份文件，使完全备份文件能直接能被用作还原文件：
+# innobackupex --apply-log /backup/2012-03-18_10-58-22
+ 
+ok，我们的备份做好了，把它传输到从服务器上：
+# cd /backup
+# tar jcf   backup.tar.gz  2012-03-18_10-58-22
+# scp backup.tar.gz root@172.16.30.6:/tmp
+ 
+ 
+从服务器上的配置：
+1，先将主服务器备份好的数据还原
+#cd /tmp
+#tar xf backup.tar.gz
+ 
+#cd /tmp/2012-03-18_10-58-22
+找到我们做好完全备份时的二进制日志的终止点，这个可以作为我们恢复即时点的起始点：
+# cat xtrabackup_binlog_info 
+mysql-bin.000002	513
+ 
+我们这里是完全备份的恢复，要关闭服务：
+#service mysqld stop
+ 
+请确保我们从服务器上的/mydata/data这个目录是空的
+#rm -rf /mydata/data/*
+ 
+安装好xtarbackup工具(同上)，然后还原数据文件：
+# innobackupex --copy-back /tmp/2012-03-18_10-58-22
+ 
+更改数据文件的属组属主：
+#cd /mydata/data
+#chown -R mysql.mysql .
+ 
+启动服务：
+# service mysqld restart
+ 
+2,开启中继日志：
+3，修改server id：(这两步的操作同第一种情况)
+4,指定主服务器:
+由于我们在主服务器上做好备份到我们把从服务器启动这段时间，主服务器上一直有数据产生，故要做时间点恢复，指定二进制文件和位置：
+mysql> change master to master_host='172.16.30.5',master_user='repl',master_password='123456',master_log_file='mysql-bin.000002',master_log_pos=513;
+ 
+5，启动从服务器进程并查看运行状态;
+mysql> start slave;
+mysql> show slave status\G
+如果出现如下行，则表明正常启动
+Slave_IO_Running: Yes
+Slave_SQL_Running: Yes
+ 
+ 
+三，主从半同步的实现（只有mysql-5.5版本之后才支持）
+ 
+默认情况下我们的主从复制是异步进行的，导致我们的从服务器有可能是落后于主服务器的，这在一定程度上是不安全的，如果我们的主服务器瞬间挂掉，从服务器将来不及复制数据。为了解决这个问题，我们可以打上google的一个补丁，使主从服务器实现半同步。
+为什么叫半同步呢？
+因为开启这个功能之后，主服务器只等待多个从服务器中的指定的一台从服务器复制成功，然后才进行其他写操作，使这个从服务器和主服务器上的数据完全同步，而并不管其他的从服务器。这在一定程度上就保证了我们数据的安全性。
+当然主服务器是不能一直等待从服务器复制成功的，因为万一从服务器挂掉，那么主服务器将一直处于等待状态而不提供写服务，这就需要我们定义一个超时时间，防止等待从服务器时间太长，单位是ms。如果超过定义的时间，从服务器还没有响应，则把指定的从服务器自动降级到异步模式，在选定一个从服务器做同步。
+ 
+ 
+在主服务器上配置：
+mysql> INSTALL PLUGIN rpl_semi_sync_master SONAME 'semisync_master.so';  
+mysql> SET GLOBAL rpl_semi_sync_master_enabled = 1;  
+mysql> SET GLOBAL rpl_semi_sync_master_timeout = 1000;
+ 
+# vim /etc/my.cnf
+在[mysqld]中添加：
+rpl_semi_sync_master_enabled=1      开启半同步功能  
+rpl_semi_sync_master_timeout=1000   设定超时时间为1000ms
+ 
+重启服务：
+#service mysqld restart
+ 
+ 
+在从服务器上配置：
+mysql> INSTALL PLUGIN rpl_semi_sync_slave SONAME 'semisync_slave.so';  
+mysql> SET GLOBAL rpl_semi_sync_slave_enabled = 1;  
+mysql> STOP SLAVE IO_THREAD; START SLAVE IO_THREAD;
+ 
+# vim /etc/my.cnf
+在[mysqld]中添加：
+rpl_semi_sync_slave_enabled=1      开启半同步功能
+ 
+重启服务：
+#service mysqld restart
+ 
+查看服务是否开启：
+mysql> show flugins;
+查看主服务器上的semi_sync是否开启,注意clients 变为1,证明主从半同步复制连接成功:
+mysql> SHOW GLOBAL STATUS LIKE 'rpl_semi%';
+查看从服务器上的semi_sync是否开启:
+mysql> SHOW GLOBAL STATUS LIKE 'rpl_semi%';
+ 
+四，主从服务器推荐的设置(如果您要做主主复制架构，这个请按需设置，但read_only绝不能设置)
+ 
+主服务器上的配置：
+# vim /etc/my.cnf
+在[mysqld]中添加：
+sync_binlog=1   
+任何一个事物提交之后就立即写入到磁盘中的二进制文件
+ 
+innodb_flush_logs_at_trx_commit=1   
+任何一个事物提交之后就立即写入到磁盘中的日志文件
+ 
+ 
+从服务器的配置：
+# vim /etc/my.cnf
+在[mysqld]中添加：
+skip_slave_start=1 
+设定从服务器开启的时候 ，从服务器进程不开启，这样可以使我们有时间对从服务器进行配置。可以用命令mysql>start slave;开启从服务器进程
+ 
+read_only=1        
+设定从服务器只能进行读操作，不能进行写操作，保证数据同步（此时super用户仍能进行写操作）
+ 
+ 
+五，主主复制架构的实现
+ 
+主主复制架构，可以实现像主从服务器进行写操作，也就是说一个是另一个的主服务器，也是另一个的从服务器。
+由于我们上边已经知道172.16.30.6为172.16.30.5的从服务器了，故我们只需知道172.16.30.5为172.16.30.6的从服务器即可。
+ 
+172.16.30.5服务器的配置：
+# vim /etc/my.cnf
+在[mysqld]中添加：
+auto-increment-increment = 2
+auto-increment-offset = 1
+ 
+重启服务
+# service mysqld restart
+ 
+mysql> show master status;
++------------------+----------+--------------+------------------+
+| File             | Position | Binlog_Do_DB | Binlog_Ignore_DB |
++------------------+----------+--------------+------------------+
+| mysql-bin.000004 |      107 |              |                  |
++------------------+----------+--------------+------------------+
+ 
+ 
+172.16.30.6服务器的配置：
+新建一个用于复制数据的用户：
+mysql> grant replication client,replication slave on *.* to repl@'172.16.30.5' identified by '123456';
+ 
+# vim /etc/my.cnf   
+在[mysqld]中添加：
+log-bin = mysql-bin
+auto-increment-increment = 2
+auto-increment-offset = 2
+ 
+重启服务：
+# service mysqld restart
+ 
+mysql> show master status;
++------------------+----------+--------------+------------------+
+| File             | Position | Binlog_Do_DB | Binlog_Ignore_DB |
++------------------+----------+--------------+------------------+
+| mysql-bin.000001 |      107 |              |                  |
++------------------+----------+--------------+------------------+
+ 
+主从服务器接下来指定对另一台服务器为自己的主服务器即可：
+172.16.30.6服务器的指向：
+mysql> stop slave;
+mysql> change master to master_host='172.16.30.5',master_user='repl',master_password='123456',master_log_file='mysql-bin.000004',master_log_pos=107;
+开启从服务进程：
+mysql> start slave;
+ 
+172.16.30.5服务器的指向：
+mysql> change master to master_host='172.16.30.6',master_user='repl',master_password='123456',master_log_file='mysql-bin.000001',master_log_pos=107;
+开启从服务进程：
+mysql> start slave;
+ 
+在172.16.30.6和172.16.30.5服务器上分别查看从服务进程的运行状态：
+mysql> show slave status\G
+如果出现如下两行，则说明工作正常：
+Slave_IO_Running: Yes
+Slave_SQL_Running: Yes
+ 
+ok，我们的主主复制架构也起来了
