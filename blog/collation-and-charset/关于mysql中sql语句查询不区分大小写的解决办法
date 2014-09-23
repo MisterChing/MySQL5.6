@@ -1,0 +1,32 @@
+MySQL在Linux下数据库名、表名、列名、别名大小写规则是这样的：
+
+1、数据库名与表名是严格区分大小写的；
+2、表的别名是严格区分大小写的；
+3、列名与列的别名在所有的情况下均是忽略大小写的；
+4、变量名也是严格区分大小写的；
+ 
+MySQL在Windows下都不区分大小写。
+MySQL在查询字符串时是大小写不敏感的，在编绎MySQL时一般以ISO-8859字符集作为默认的字符集，这个字符集对大小写不敏感,因此在比较过程中中文编码字符大小写转换造成了这种现象。
+ 
+ 
+2.解决办法
+ 
+A.表名区分大小写
+ 
+在my.conf加入：
+ower_case_table_names = 0
+其中 0：区分大小写，1：不区分大小写
+ 
+B.插入查询时区分大小写
+ 
+字段值需要设置BINARY属性，即可区分大小写。
+ 
+设置的方法有多种：
+创建时设置： 
+CREATE TABLE T( 
+A VARCHAR(10) BINARY 
+);
+ 
+使用alter修改： 
+ALTER TABLE `tablename` MODIFY COLUMN `cloname` VARCHAR(45) BINARY;
+mysql table editor中直接勾选BINARY项。 参考 http://www.javaeye.com/topic/766135
