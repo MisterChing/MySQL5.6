@@ -1,0 +1,12 @@
+mysql> show collation like '%cs';
++--------------------+---------+----+---------+----------+---------+
+| Collation          | Charset | Id | Default | Compiled | Sortlen |
++--------------------+---------+----+---------+----------+---------+
+| latin1_general_cs  | latin1  | 49 |         | Yes      |       1 |
+| latin2_czech_cs    | latin2  |  2 |         | Yes      |       4 |
+| cp1250_czech_cs    | cp1250  | 34 |         | Yes      |       2 |
+| latin7_estonian_cs | latin7  | 20 |         | Yes      |       1 |
+| latin7_general_cs  | latin7  | 42 |         | Yes      |       1 |
+| cp1251_general_cs  | cp1251  | 52 |         | Yes      |       1 |
++--------------------+---------+----+---------+----------+---------+
+6 rows in set (0.00 sec)
