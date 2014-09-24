@@ -1,0 +1,67 @@
+　　随着访问量的增加，对于一些比较耗时的数据库读取操作，一般采用将写入与读取操作分开来缓解数据库的压力，数据库引擎一般采用Master/Slave架构。虽然这种架构不能从根本上解决数据库的失败设计，但对于数据库的性能优化还是可以起到一些的作用的，特别是对于MySql，读取的时候，没有像SQL Server的unlock操作。
+　　为了搭建一个Master/Slave环境，由于资源有限，就在本机上安装了两个MySql服务，一个用于Master，一个用于Slave同步数据。
+　　一、在windows环境下面安装两个MySql服务
+　　从mysql官方网站下载mysql，我下载的是5.1.46版。按照windows的向导一步一步安装，安排过程不再详述。
+　　安装完成之后，一般需要简单的配置，根据你自己的机器配置，从my-huge.ini、my-innodb-heavy-4G.ini、my-large.ini、my-medium.ini、my-small.ini选择一个合适的配置文件，将文件复制一份，更名为my.ini，修改里面的基本配置信息。
+[mysqld] 
+basedir=D:\Program Files\MySQL Server 5.1  #MySql安装路径 
+datadir=D:\Data\MySQL\data  #MySql数据库存放路径，我不太喜欢将其存放在MySql安装路径中 
+default-character-set=gbk  #默认字符集 
+port=3306  #端口号
+　　打开MS-DOS窗口，进入DOS环境，切换到"%MySQL_HOME%\bin"目录
+　　运行： %MySQL_HOME%\bin>mysqld --install mysql，创建mysql服务(去控制面板->服务中验证)
+　　启动服务，进入mysql，show databases;一下，看是否正常运行。
+　　安装过一个服务之后，就可以安装第二个服务了。
+　　一、将安装过的文件，复制一份，复制到合适的位置并更名，以我的为例，D:\Program Files\MySQL Slave 5.1
+　　二、修改端口号，basedir、datadir
+　　三、通过命令行方式进行D:\Program Files\MySQL Slave 5.1\Bin，创建服务：mysqld --install mysql2
+　　四、进入注册表编辑器，找到 HKEY_LOCAL_MACHINE ->SYSTEM->CurrentControlSet->services->mysql2 .编辑ImagePath为：”"D:\Program Files\MySQL Slave 5.1\bin\mysqld" mysql2”，保存即可。
+　　五、在命令提示符下，net start mysql2，即可启动服务。
+　　注意：如果你安装的MySql已经有一些数据了，需要将这些数据也拷贝到第二个MySql服务的datadir中。
+　　创建成功后，启动mysql2服务，进入mysql2(用相同的密码)，验证是否创建成功。
+　　二、搭建MySql的Master/Slave架构
+　　在Master(Mysql5.1)的数据库中建立一个备份帐户，命令如下:
+　　GRANT REPLICATION SLAVE ON *.* TO 'slave'@'localhost' IDENTIFIED BY '123';
+　　Master修改如下(my.ini):
+[mysqld]   
+#Master start 
+
+#日志输入地址 主要同步使用 
+log-bin=D:\Data\log\Master\log-bin.log 
+
+#同步数据库 
+binlog-do-db=renli 
+
+#主机id 不能和从机id重复 
+server-id=1 
+
+#Master end
+　　Slave修改如下(my.ini):
+#Slave start 
+log-bin=D:\Data\log\Slave\log-bin.log 
+
+#从机id,区别于主机id 
+server-id=2 
+#主机ip，供从机连接主机用 
+master-host=localhost 
+#主机端口 
+master-port=3306 
+#刚才为从机复制主机数据新建的帐号 
+master-user=slave 
+#刚才为从机复制主机数据新建的密码 
+master-password=123 
+#重试间隔时间10秒 
+master-connect-retry=10 
+#需要同步的数据库 
+replicate-do-db=renli 
+#启用从库日志，这样可以进行链式复制 
+log-slave-updates 
+#从库是否只读，0表示可读写，1表示只读 
+read-only=1 
+
+#Slave end
+　　在Master上面可以通过show master status \G;查看当前Master的状态
+　　在Slave上面可以通过show slave status \G;查看当前slave的状态
+　　请避免数据不同步的时候，设置Master/Slave架构。可以通过start slave与stop slave来开启和关闭同步。
+　　三、MySql其它
+　　看你的mysql现在已提供什么存储引擎:mysql> show engines; 看你的mysql当前默认的存储引擎:mysql> show variables like '%storage_engine%';你要看某个表用了什么引擎(在显示结果里参数engine后面的就表示该表当前用的存储引擎):mysql> show create table 表名; 锁表：flush tables with read lock;
