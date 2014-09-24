@@ -1,0 +1,95 @@
+　　MySQL的主从同步是一个很成熟的架构，优点为：①在从服务器可以执行查询工作(即我们常说的读功能)，降低主服 务器压力;②在从主服务器进行备份，避免备份期间影响主服务器服务;③当主服务器出现问题时，可以切换到从服务器。所以我在项目部署和实施中经常会采用这 种方案;鉴于生产环境下的mysql的严谨性，我这里推荐采用张宴兄的MySQL源码编译的方法(主从同步前建议ntpdate主从服务器的系统时间，以免同步时报错);
+　　数据库目录及其它
+　　my.cnf配置文件 /usr/local/webserver/mysql/my.cnf
+　　mysql数据库位置 /usr/local/webserver/mysql/data/
+　　主数据库：192.168.110.64
+　　从数据库：192.168.110.62
+　　操作系统：RHEL5.4 64位
+　　服务器类型: HP 580G5,双四核XeonE5520,32G内存，4块300GSAS做成RAID10
+　　mysql5.1.38源码编译过程如下:
+　　/usr/sbin/groupadd mysql 
+　　/usr/sbin/useradd -g mysql mysql 
+　　unzip mysql-5.1.38.zip 
+　　cd mysql-5.1.38/ 
+　　./configure --prefix=/usr/local/webserver/mysql/ --enable-assembler --with-extra-charsets=complex --enable-thread-safe-client --with-big-tables --with-readline --with-ssl --with-embedded-server --enable-local-infile --with-plugins=innobase 
+　　make && make install 
+　　chmod +w /usr/local/webserver/mysql 
+　　chown -R mysql:mysql /usr/local/webserver/mysql 
+　　cp support-files/my-medium.cnf /usr/local/webserver/mysql/my.cnf 
+　　#这部可依具体环境而定，压力大的化可采用huge.cnf 
+　　cd ../ 
+　　①以mysql用户帐号的身份建立数据表： 
+　　/usr/local/webserver/mysql/bin/mysql_install_db --basedir=/usr/local/webserver/mysql --datadir=/usr/local/webserver/mysql/data --user=mysql 
+　　②启动MySQL(最后的&表示在后台运行) 
+　　/bin/sh /usr/local/webserver/mysql/bin/mysqld_safe --defaults-file=/usr/local/webserver/mysql/my.cnf &
+　　一、设置主库
+　　1、修改主库my.cnf,主要是设置个不一样的id和logbin
+　　#vim /usr/local/webserver/mysql/my.cnf 
+　　server-id = 1 
+　　log-bin= binlog 
+　　binlog-do-db=iea
+　　2、启动主库生效
+　　#/bin/sh /usr/local/webserver/mysql/bin/mysqld_safe --defaults-file=/usr/local/webserver/mysql/my.cnf &
+　　3、登陆主库
+　　#/usr/local/webserver/bin/mysql -u root -p
+　　4、赋予从库权限帐号，允许用户在主库上读取日志
+　　mysql> grant all privileges on *.* to [email=]'admin'@'%'[/email] identified by '12345678';
+　　5、检查创建是否成功
+　　select user,host from mysql.user;
+　　6、锁主库表
+　　mysql> flush tables with read lock;
+　　7、显示主库信息
+　　记录File和Position，从库设置将会用到
+　　mysql> show master status;
+　　+------------------+----------+--------------+------------------+
+　　| File | Position | Binlog_Do_DB | Binlog_Ignore_DB |
+　　+------------------+----------+--------------+------------------+
+　　| mysql-bin.000003 1635708 | | |
+　　+------------------+----------+--------------+------------------+
+　　1 row in set (0.00 sec)
+　　8、另开一个终端登陆124，打包主库迁移数据
+　　# cd /usr/local/webserver/mysql/
+　　# tar zcvf data124.tar.gz ./data
+　　二、设置从库
+　　1、传输拿到主库包、解包
+　　登陆从库
+　　#cd /usr/local/webserver/mysql/
+　　#tar zxvf data124.tar.gz
+　　2、解锁主库表
+　　mysql> unlock tables;
+　　3、修改从库my.cnf
+　　# vi my.cnf
+　　# slave
+　　server-id=2
+　　master-host=192.168.110.64
+　　master-user=admin
+　　master-password=12345678
+　　4、验证连接主库
+　　# /usr/local/webserver/mysql/bin/mysql -h 192.168.110.64 -u admin -p
+　　5、在从库上设置同步
+　　设置连接MASTER MASTER_LOG_FILE为主库的File，MASTER_LOG_POS为主库的Position
+　　mysql> slave stop;
+　　mysql> change master to master_host='192.168.110.64',master_user='admin', master_password='12345678',
+　　master_log_file='binlog.000003', master_log_pos=1635708;
+　　mysql> slave start;
+　　6、启动从库服务
+　　mysql> slave start;
+　　7、进行测试
+　　在主库上的iea表上建立名为yuhongchun的表
+　　mysql> CREATE TABLE `yuhongchun` ( 
+　　`id` INT( 5 ) UNSIGNED NOT NULL AUTO_INCREMENT , 
+　　`username` VARCHAR( 20 ) NOT NULL , 
+　　`password` CHAR( 32 ) NOT NULL , 
+　　`time` DATETIME NOT NULL , 
+　　`number` FLOAT( 10 ) NOT NULL , 
+　　`content` TEXT NOT NULL , 
+　　PRIMARY KEY ( `id` ) 
+　　) ENGINE = MYISAM ;
+　　在从表中马上看到了效果，主从同步成功了;为了更进一步验证在从库上输入show slave status\G;mysql> show slave status\G;
+　　Slave_IO_Running: Yes(网络正常);Slave_SQL_Running: Yes(表结构正常)，进一步验证了以上过程的正确性。
+　　2010年10月20日第④版更新内容如下：
+　　一、同步前先ntpdate主从服务器的系统时间;
+　　二、增加了mysql5.1.38的编译安装过程，安装过程仍然采用张宴早期安装mysql的方法，摈弃了用脚本控制的办法;
+　　三、从库取主库的方法仍然采用tar获取，未采用mysqldump的原因是在实际配置中发现，此法失败的机率比较大，故一直用tar取主数据库的完整快照，这里有网友不是太理解，这里重点说明下;
+　　四、mysql主从复制虽然配置比较简单，但同时也是柄刃剑;因为如果在主库上发生误删表现象，从库也会发生;所以主表的单机备份一定要作为，主数据库上 我采用的mysqlhotcopy+mysqldump双完备方式;通过以前的工作经验知道，这样发生数据丢失的机率较低;
+　　五、签于生产环境的严谨性，此贴欢迎大家交流探讨，找出其中的bug和错误，以免误导新人;此贴我会持续关注和更新
