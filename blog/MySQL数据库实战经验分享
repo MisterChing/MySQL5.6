@@ -1,0 +1,35 @@
+　　一、数据库层面
+　　对于像游戏的这种heavy write类型的数据库，InnoDB是更优于MyISAM型的，所以在开始不妨将数据库的引擎设置为InnoDB，至于InnoDB与MyISAM的区别，可参考文档。
+　　除此而外，在设置数据库的buffer时也不能太大，例如我们的亚马逊服务器是8G内存我们设置了2G作为buffer，而connection数也不能太小，1000左右基本能够满足一般的并发要求。
+　　在实际中可能还会遇到，例如出现 “InnoDB: Error: cannot allocate 2147500032 bytes of…”而不能启动mysql，则说明mysql设置的buffer太大，将其调小就可解决。
+　　有时也会出现，“Incorrect key file for table '/tmp/#sql_4681_11.MYI'; try to repair it”这样的错误，这是因为/tmp/目录已经磁盘满了，无法写入，通常可以将mysql的目录指向一个大一点的磁盘区间即可。
+　　如果你的应用和我们类似要支持像德语这样的字符集，则Mysql最初就必须设置为utf8，否则后面你会死的很惨(大堆的问号???)，最好在配置文件中已经设置好。
+　　最后就是要时常的备份数据，信息化社会的今天，数据是最重要的，备份以保证数据的安全，从而避免可能出现的数据丢失等。
+　　二、应用层面
+　　应用层面如果用一句话来概括，即是：对于并非紧急重要的查询，可用简化的查询来实现逻辑上的替换。一个实际的例子是我们最近10W用户的PopCool,它是一个挑战类竞技游戏，其中有一处的逻辑的最初设计是显示最新的10名玩家，因为我们用户的挑战记录在Game表中，用户的信息在Player表中，并且Game表中分别有指向Player表的两个外键，所以最初要实现这个逻辑的查询为(取自slow query)：
+
+SELECT `games_game`.`id`, `games_game`.`mini_game_id`, `games_game`.`user_a_id`, 
+　　`games_game`.`user_b_id`, `games_game`.`score`, `games_game`.`challenge_time`, 
+　　`games_game`.`is_challenged_back`, T3.`id`, T3.`sns_id`, T3.`name`, T3.`sex`, 
+　　T3.`img_url`, T3.`status`, T3.`level`, T3.`top_score`, T3.`top_score_level`, 
+　　T3.`coins`, T3.`neighbor_num`, T3.`last_login_time`, T3.`reg_date`, T3.`last_bonus_time`, 
+　　`player_player`.`id`, `player_player`.`sns_id`, 
+　　`player_player`.`name`, `player_player`.`sex`, `player_player`.`img_url`, 
+　　`player_player`.`status`, `player_player`.`level`, `player_player`.`top_score`, 
+　　`player_player`.`top_score_level`, `player_player`.`coins`, 
+　　`player_player`.`neighbor_num`, `player_player`.`last_login_time`, 
+　　`player_player`.`reg_date`, `player_player`.`last_bonus_time` 
+　　FROM `games_game` INNER JOIN `player_player` 
+　　ON (`games_game`.`user_b_id` = `player_player`.`id`) 
+　　INNER JOIN `player_player` T3 ON (`games_game`.`user_a_id` = T3.`id`) 
+　　WHERE (`games_game`.`user_b_id` = N AND `games_game`.`is_challenged_back` = N 
+　　AND NOT (`games_game`.`user_a_id` = N ))
+　　上面的SQL显得有些冗长，但是不难发现有两个INNER JOIN连表操作，当Player表有10W+数据时，查询的效率可想而知。于是我们做出如下的调整：我们使用最近登录的10个用户替换之前的10位最近玩家的信息，于是查询就变成了：
+　　Select player_player.name, …, from player_player order by last_login_time DESC limit 10;
+　　而其中并不涉及连表操作。当然请注意，使用的前提是：不影响产品的整体功能和用户的体验，对于此例，最新用户显示的只是供当前玩家挑战的可选玩家，所以求其次的最近登录玩家并不会影响用户的体验。
+　　推而广之，产品的实现可不用过于拘泥于产品的设计，合理的平衡二者能够起到意想不到的效果。
+　　P.S 因为这个改变，游戏玩家的反应好了很多，游戏的响应和速度有了明显的改善。
+　　另一方面，在应用层面，要尽量使用整形而非字符型，同样是我们的PopCool,因为我们游戏所处的是VZ,它的用户id是20位左右的字符串，所以，我们最初在查询时使用的是这种字符的匹配，而后面的优化时，因为我们的自增主键id是整形，我们对于同样的查询使用整形后，查询的效率有了明显的提高。
+　　另外，在应用和数据库之间可使用Memcached来进行缓存，Memcached的操作是比较容易的set,get,delete等，但是设置一个好的过期时间显得比较重要和需要技巧，如何既能保证数据的有效性又能尽大可能地提高性能，这通常需要你对自己的产品有十分深入的理解。我们的PopCool中涉及到排行，而排行对时间的要求并不高，所以我们设置期过期时间为1小时，基本算是比较恰当的了。
+　　凡此等等，要注意避免一些常见的慢查询，当然使用slow query和explain来分析也是非常重要。
+　　最后，不妨可以阅读下MySql performance tips以避免常见的性能问题。
