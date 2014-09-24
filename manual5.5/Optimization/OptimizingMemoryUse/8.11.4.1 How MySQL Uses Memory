@@ -1,0 +1,170 @@
+The following list indicates some of the ways that the mysqld server uses memory. Where applicable, the name of the system variable relevant to the memory use is given:
+
+All threads share the MyISAM key buffer; its size is determined by the key_buffer_size variable. Other buffers used by the server are allocated as needed. See Section 8.11.2, “Tuning Server Parameters”.
+
+Each thread that is used to manage client connections uses some thread-specific space. The following list indicates these and which variables control their size:
+
+A stack (variable thread_stack)
+
+A connection buffer (variable net_buffer_length)
+
+A result buffer (variable net_buffer_length)
+
+The connection buffer and result buffer each begin with a size equal to net_buffer_length bytes, but are dynamically enlarged up to max_allowed_packet bytes as needed. The result buffer shrinks to net_buffer_length bytes after each SQL statement. While a statement is running, a copy of the current statement string is also allocated.
+
+All threads share the same base memory.
+
+When a thread is no longer needed, the memory allocated to it is released and returned to the system unless the thread goes back into the thread cache. In that case, the memory remains allocated.
+
+The myisam_use_mmap system variable can be set to 1 to enable memory-mapping for all MyISAM tables.
+
+Each request that performs a sequential scan of a table allocates a read buffer (variable read_buffer_size).
+
+When reading rows in an arbitrary sequence (for example, following a sort), a random-read buffer (variable read_rnd_buffer_size) may be allocated to avoid disk seeks.
+
+All joins are executed in a single pass, and most joins can be done without even using a temporary table. Most temporary tables are memory-based hash tables. Temporary tables with a large row length (calculated as the sum of all column lengths) or that contain BLOB columns are stored on disk.
+
+If an internal in-memory temporary table becomes too large, MySQL handles this automatically by changing the table from in-memory to on-disk format, to be handled by the MyISAM storage engine. You can increase the permissible temporary table size as described in Section 8.4.4, “How MySQL Uses Internal Temporary Tables”.
+
+Most requests that perform a sort allocate a sort buffer and zero to two temporary files depending on the result set size. See Section B.5.4.4, “Where MySQL Stores Temporary Files”.
+
+Almost all parsing and calculating is done in thread-local and reusable memory pools. No memory overhead is needed for small items, so the normal slow memory allocation and freeing is avoided. Memory is allocated only for unexpectedly large strings.
+
+For each MyISAM table that is opened, the index file is opened once; the data file is opened once for each concurrently running thread. For each concurrent thread, a table structure, column structures for each column, and a buffer of size 3 * N are allocated (where N is the maximum row length, not counting BLOB columns). A BLOB column requires five to eight bytes plus the length of the BLOB data. The MyISAM storage engine maintains one extra row buffer for internal use.
+
+For each table having BLOB columns, a buffer is enlarged dynamically to read in larger BLOB values. If you scan a table, a buffer as large as the largest BLOB value is allocated.
+
+Handler structures for all in-use tables are saved in a cache and managed as a FIFO. The initial cache size is taken from the value of the table_open_cache system variable. If a table has been used by two running threads at the same time, the cache contains two entries for the table. See Section 8.4.3.1, “How MySQL Opens and Closes Tables”.
+
+A FLUSH TABLES statement or mysqladmin flush-tables command closes all tables that are not in use at once and marks all in-use tables to be closed when the currently executing thread finishes. This effectively frees most in-use memory. FLUSH TABLES does not return until all tables have been closed.
+
+The server caches information in memory as a result of GRANT, CREATE USER, CREATE SERVER, and INSTALL PLUGIN statements. This memory is not released by the corresponding REVOKE, DROP USER, DROP SERVER, and UNINSTALL PLUGIN statements, so for a server that executes many instances of the statements that cause caching, there will be an increase in memory use. This cached memory can be freed with FLUSH PRIVILEGES.
+
+ps and other system status programs may report that mysqld uses a lot of memory. This may be caused by thread stacks on different memory addresses. For example, the Solaris version of ps counts the unused memory between stacks as used memory. To verify this, check available swap with swap -s. We test mysqld with several memory-leakage detectors (both commercial and Open Source), so there should be no memory leaks.
+
+
+
+
+
+
+User Comments
+Posted by Kelly Campbell on May 13 2005 5:03pm	[Delete] [Edit]
+tmp_table_size is not the only variable that determines when a tmp table is written to disk. max_heap_table_size also applies.
+
+Posted by sheila yao on October 2 2007 6:01pm	[Delete] [Edit]
+I got this formula from mysql error log complaining it doesn't have enough memory to start mysqld:
+key_buffer_size + (read_buffer_size + sort_buffer_size) * max_connections = K bytes of memory 
+
+I hope this document could be straight forward by providing a formula to calculate the memory usage for mysqld. 
+
+Sheila 
+
+
+Posted by Guy Baconniere on May 6 2009 3:50pm	[Delete] [Edit]
+I use the following SQL query to guess MySQL memory usage 
+of MySQL unfortunately innodb_* and thread_stack are not
+part of MySQL system variables so you need to fill them
+manually.
+
+Best Regards,
+Guy Baconniere
+
+--
+
+SHOW VARIABLES LIKE 'innodb_buffer_pool_size';
+SHOW VARIABLES LIKE 'innodb_additional_mem_pool_size';
+SHOW VARIABLES LIKE 'innodb_log_buffer_size';
+SHOW VARIABLES LIKE 'thread_stack';
+SET @kilo_bytes = 1024;
+SET @mega_bytes = @kilo_bytes * 1024;
+SET @giga_bytes = @mega_bytes * 1024;
+SET @innodb_buffer_pool_size = 2 * @giga_bytes;
+SET @innodb_additional_mem_pool_size = 16 * @mega_bytes;
+SET @innodb_log_buffer_size = 8 * @mega_bytes;
+SET @thread_stack = 192 * @kilo_bytes;
+SELECT
+( @@key_buffer_size + @@query_cache_size + @@tmp_table_size
++ @innodb_buffer_pool_size + @innodb_additional_mem_pool_size
++ @innodb_log_buffer_size
++ @@max_connections * (
+@@read_buffer_size + @@read_rnd_buffer_size + @@sort_buffer_size
++ @@join_buffer_size + @@binlog_cache_size + @thread_stack
+) ) / @giga_bytes AS MAX_MEMORY_GB;
+
++---------------+
+| MAX_MEMORY_GB |
++---------------+
+|        3.7002 |
++---------------+
+1 row in set (0.00 sec)
+Posted by NOT_FOUND NOT_FOUND on March 19 2010 7:06pm	[Delete] [Edit]
+I disagree with how the previous comment handles the tmp_table_size value. They treat it as a single allocation on the global scope when for memory consumption purposes it is more in line with a per thread buffer.
+
+A single connection/query can use a single or multiple temporary tables in the duration of its processing. The connections do not use a single temporary table "area" reserved just for that purpose.
+
+If you are going to use a formula for memory consumption, the tmp_table-size should be located with the other per thread buffers - not in the single allocation listing.
+
+Posted by Christopher Schultz on January 30 2013 8:50pm	[Delete] [Edit]
+Based upon the previous two comments, I re-worked the max-mem-usage query and made it work (there weren't enough @'s on some variables and @giga_bytes isn't defined). This returns a non-null value on MySQL 5.5.29:
+
+SELECT ( @@key_buffer_size
++ @@query_cache_size
++ @@innodb_buffer_pool_size
++ @@innodb_additional_mem_pool_size
++ @@innodb_log_buffer_size
++ @@max_connections * ( @@read_buffer_size
++ @@read_rnd_buffer_size
++ @@sort_buffer_size
++ @@join_buffer_size
++ @@binlog_cache_size
++ @@thread_stack
++ @@tmp_table_size )
+) / (1024 * 1024 * 1024) AS MAX_MEMORY_GB;
+
+Posted by Eduardo Franceschi on December 26 2013 10:32pm	[Delete] [Edit]
+I wrote a shell script based on above examples. I've added a min/max memory suggestions also. The minimum memory is estimated using the Max_used_connections variable from SHOW STATUS.
+
+#!/bin/sh
+
+mysql -e "show variables; show status" | awk '
+{
+VAR[$1]=$2
+}
+END {
+MAX_CONN = VAR["max_connections"]
+MAX_USED_CONN = VAR["Max_used_connections"]
+BASE_MEM=VAR["key_buffer_size"] + VAR["query_cache_size"] + VAR["innodb_buffer_pool_size"] + VAR["innodb_additional_mem_pool_size"] + VAR["innodb_log_buffer_size"] 
+MEM_PER_CONN=VAR["read_buffer_size"] + VAR["read_rnd_buffer_size"] + VAR["sort_buffer_size"] + VAR["join_buffer_size"] + VAR["binlog_cache_size"] + VAR["thread_stack"] + VAR["tmp_table_size"]
+MEM_TOTAL_MIN=BASE_MEM + MEM_PER_CONN*MAX_USED_CONN
+MEM_TOTAL_MAX=BASE_MEM + MEM_PER_CONN*MAX_CONN
+
+printf "+------------------------------------------+--------------------+\n"
+printf "| %40s | %15.3f MB |\n", "key_buffer_size", VAR["key_buffer_size"]/1048576
+printf "| %40s | %15.3f MB |\n", "query_cache_size", VAR["query_cache_size"]/1048576
+printf "| %40s | %15.3f MB |\n", "innodb_buffer_pool_size", VAR["innodb_buffer_pool_size"]/1048576
+printf "| %40s | %15.3f MB |\n", "innodb_additional_mem_pool_size", VAR["innodb_additional_mem_pool_size"]/1048576
+printf "| %40s | %15.3f MB |\n", "innodb_log_buffer_size", VAR["innodb_log_buffer_size"]/1048576
+printf "+------------------------------------------+--------------------+\n"
+printf "| %40s | %15.3f MB |\n", "BASE MEMORY", BASE_MEM/1048576
+printf "+------------------------------------------+--------------------+\n"
+printf "| %40s | %15.3f MB |\n", "sort_buffer_size", VAR["sort_buffer_size"]/1048576
+printf "| %40s | %15.3f MB |\n", "read_buffer_size", VAR["read_buffer_size"]/1048576
+printf "| %40s | %15.3f MB |\n", "read_rnd_buffer_size", VAR["read_rnd_buffer_size"]/1048576
+printf "| %40s | %15.3f MB |\n", "join_buffer_size", VAR["join_buffer_size"]/1048576
+printf "| %40s | %15.3f MB |\n", "thread_stack", VAR["thread_stack"]/1048576
+printf "| %40s | %15.3f MB |\n", "binlog_cache_size", VAR["binlog_cache_size"]/1048576
+printf "| %40s | %15.3f MB |\n", "tmp_table_size", VAR["tmp_table_size"]/1048576
+printf "+------------------------------------------+--------------------+\n"
+printf "| %40s | %15.3f MB |\n", "MEMORY PER CONNECTION", MEM_PER_CONN/1048576
+printf "+------------------------------------------+--------------------+\n"
+printf "| %40s | %18d |\n", "Max_used_connections", MAX_USED_CONN
+printf "| %40s | %18d |\n", "max_connections", MAX_CONN
+printf "+------------------------------------------+--------------------+\n"
+printf "| %40s | %15.3f MB |\n", "TOTAL (MIN)", MEM_TOTAL_MIN/1048576
+printf "| %40s | %15.3f MB |\n", "TOTAL (MAX)", MEM_TOTAL_MAX/1048576
+printf "+------------------------------------------+--------------------+\n"
+}'
+
+
+Posted by Shane Bester on September 2 2014 5:59am	[Delete] [Edit]
+folks above using their own formulas, don't forget about memory used by performance schema (SHOW ENGINE PERFORMANCE_SCHEMA STATUS) and global variable innodb_ft_total_cache_size.
