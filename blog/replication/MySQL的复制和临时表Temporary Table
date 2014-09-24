@@ -1,0 +1,67 @@
+　　当你创建临时表的时候，你可以使用temporary关键字。如：
+　　create temporary table tmp_table(name varchar(10) not null,passwd char(6) not null)
+　　临时表只在当前连接可见，当这个连接关闭的时候，会自动drop。这就意味着你可以在两个不同的连接里使用相同的临时表名，并且相互不会冲突，或者使用已经存在的表，但不是临时表的表名。(当这个临时表存在的时候，存在的表被隐藏了，如果临时表被drop，存在的表就可见了)。创建临时表你必须有
+　　create temporary table 权限。
+　　下面几点是临时表的限制：
+　　临时表只能用在 memory,myisam,merge,或者innodb
+　　临时表不支持mysql cluster(簇)
+　　在同一个query语句中，你只能查找一次临时表。例如：下面的就不可用
+　　mysql> SELECT * FROM temp_table, temp_table AS t2;
+　　ERROR 1137: Can't reopen table: 'temp_table'
+　　如果在一个存储函数里，你用不同的别名查找一个临时表多次，或者在这个存储函数里用不同的语句查找，这个错误都会发生。
+　　show tables 语句不会列举临时表
+　　你不能用rename来重命名一个临时表。但是，你可以alter table代替：
+　　mysql>ALTER TABLE orig_name RENAME new_name;
+　　复制和临时表
+　　当使用临时表的时候，安全关闭slave。临时表是可以被复制的，除了你关闭了从库服务(而不仅仅是slave线程)和你已经打开了复制的临时表更新，在从库上还没有执行。如果你停止了从库服务，当从库重新启动时，临时表需要这些更新，已经不再可用的。为了避免这个问题，当临时表打开时，不要停止slave服务。用下面的步骤代替：
+　　使用stop slave sql_thread语句
+　　使用show status查看Slave_open_temp_tables的值
+　　如果这个值不是0，使用start slave sql_thread;重启从库SQL 线程,一会儿后再重复执行这个步骤
+　　当这个值是0时，使用mysqladmin shutdown命令停止slave.
+　　临时表和复制选项。默认，所有的临时表都是被复制的，无论是否匹配--replicate-do-db, --replicate-do-table, or --replicate-wild-do-table，复制临时表都会发生。但是，--replicate-ignore-table 和 --replicate-wild-ignore-table 两个选项是用来忽略临时表的。
+　　如果你不想复制某些临时表，请使用--replicate-wild-ignore-table 选项。如：--replicate-wild-ignore-table=foo%.bar%,意思是告诉slave线程不要复制匹配以foo开头和以bar开头的表。
+　　下面是转自网上某人的配置信息：
+　　master端配置：
+　　[mysqld]    
+  #Master start    
+  #日志输出地址 主要同步使用    
+  log-bin=/var/log/mysql/updatelog 
+  #同步数据库    
+  binlog-do-db=cnb   
+  #主机id 不能和从机id重复    
+  server-id=1     
+  #Master end  
+　　slave端配置：
+　　[mysqld] 
+　　#Slave start 
+　　#从机id，区别于主机id 
+　　server-id=2 
+　　#主机ip，供从机连接主机用 
+　　master-host=192.168.0.24 
+　　#主机端口 
+　　master-port=3307 
+　　#刚才为从机复制主机数据新建的账号 
+　　master-user=slave 
+　　#刚才为从机复制主机数据新建的密码 
+　　master-password=123456 
+　　#重试间隔时间10秒 
+　　master-connect-retry=10 
+　　#需要同步的数据库 
+　　replicate-do-db=cnb 
+　　#启用从库日志，这样可以进行链式复制 
+　　log-slave-updates 
+　　#从库是否只读，0表示可读写，1表示只读 
+　　read-only=1 
+　　#只复制某个表 
+　　#replicate-do-table=tablename 
+　　#只复制某些表(可用匹配符) 
+　　#replicate-wild-do-table=tablename% 
+　　#只复制某个库 
+　　#replicate-do-db=dbname 
+　　#不复制某个表 
+　　#replicate-ignore-table=tablename 
+　　#不复制某些表 
+　　#replicate-wild-ignore-table=tablename% 
+　　#不复制某个库 
+　　#replicate-ignore-db=dbname 
+　　#Slave end
