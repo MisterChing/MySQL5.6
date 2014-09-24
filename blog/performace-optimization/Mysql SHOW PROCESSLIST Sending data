@@ -1,0 +1,251 @@
+我的系统在实际应用中当show processlist的时候看到大多时候都是Sending data！也就是我一直非常奇怪为什么会有这么多Sending data 滞留在我的系统中，真是往客户端发送查询结果不应该这么慢的！
+文档上说：Sending data The thread is processing rows for a SELECT statement and is also sending data to the client.
+我特别想要说明的是黄底部分的，虽然字面上看起来好像这个状态意味着在给客户端发送数据而已，实际上不完全是这样的，比如MySQL找到查询结果（30条记录，没有Cache到内存中，散布在硬盘上不同的地方）了，这样的话实际上要从这30个不同的地方取出这30条记录，也就是要寻道30次（特别散，Cache不到 :)），这个任务我觉得可以看成 The thread is processing rows for a SELECT statement ！
+
+
+这个时候也许要想办法去增加内存，让MySQL不但将Index能Cache到内存中，才能够更多地将具体数据Cache到内存中了！
+
+来自MySQL手册：
+
+6.5.5.2. General Thread States
+
+The following list describes thread State values that are associated with general query processing and not more specialized activities such as replication. Many of these are useful only for finding bugs in the server.
+
+After create
+
+Occurs when the thread creates a table (including internal temporary tables), at the end of the function that creates the table. This state is used even if the table could not be created due to some error.
+
+Analyzing
+
+The thread is calculating a MyISAM table key distributions (for example, for ANALYZE TABLE).
+
+Checking table
+
+The thread is performing a table check operation.
+
+cleaning up
+
+The thread has processed one command and is preparing to free memory and reset certain state variables.
+
+closing tables
+
+Means that the thread is flushing the changed table data to disk and closing the used tables. This should be a fast operation. If not, you should verify that you do not have a full disk and that the disk is not in very heavy use.
+
+converting HEAP to MyISAM
+
+The thread is converting an internal temporary table from a MEMORY table to an on-disk MyISAM table.
+
+copy to tmp table
+
+The thread is processing an ALTER TABLE statement. This state occurs after the table with the new structure has been created but before rows are copied into it.
+
+Copying to group table
+
+If a statement has different ORDER BY and GROUP BY criteria, the rows are sorted by group and copied to a temporary table.
+
+Copying to tmp table
+
+The server is copying to a temporary table in memory.
+
+Copying to tmp table on disk
+
+The server is copying to a temporary table on disk. The temporary result set was larger than tmp_table_size and the thread is changing the temporary table from in-memory to disk-based format to save memory.
+
+Creating index
+
+The thread is processing ALTER TABLE ... ENABLE KEYS for a MyISAM table.
+
+Creating sort index
+
+The thread is processing a SELECT that is resolved using an internal temporary table.
+
+creating table
+
+The thread is creating a table. This includes creation of temporary tables.
+
+Creating tmp table
+
+The thread is creating a temporary table in memory or on disk. If the table is created in memory but later is converted to an on-disk table, the state during that operation will be Copying to tmp table on disk.
+
+deleting from main table
+
+The server is executing the first part of a multiple-table delete. It is deleting only from the first table, and saving fields and offsets to be used for deleting from the other (reference) tables.
+
+deleting from reference tables
+
+The server is executing the second part of a multiple-table delete and deleting the matched rows from the other tables.
+
+discard_or_import_tablespace
+
+The thread is processing an ALTER TABLE ... DISCARD TABLESPACE or ALTER TABLE ... IMPORT TABLESPACE statement.
+
+end
+
+This occurs at the end but before the cleanup of ALTER TABLE, CREATE VIEW, DELETE, INSERT, SELECT, or UPDATE statements.
+
+Execution of init_command
+
+The thread is executing statements in the value of the init_command system variable.
+
+freeing items
+
+The thread has executed a command. This state is usually followed by cleaning up.
+
+Flushing tables
+
+The thread is executing FLUSH TABLES and is waiting for all threads to close their tables.
+
+FULLTEXT initialization
+
+The server is preparing to perform a natural-language full-text search.
+
+init
+
+This occurs before the initialization of ALTER TABLE, DELETE, INSERT, SELECT, or UPDATE statements.
+
+Killed
+
+Someone has sent a KILL statement to the thread and it should abort next time it checks the kill flag. The flag is checked in each major loop in MySQL, but in some cases it might still take a short time for the thread to die. If the thread is locked by some other thread, the kill takes effect as soon as the other thread releases its lock.
+
+Locked
+
+The query is locked by another query.
+
+logging slow query
+
+The thread is writing a statement to the slow-query log.
+
+login
+
+The initial state for a connection thread until the client has been authenticated successfully.
+
+Opening tables, Opening table
+
+The thread is trying to open a table. This is should be very fast procedure, unless something prevents opening. For example, an ALTER TABLE or a LOCK TABLE statement can prevent opening a table until the statement is finished.
+
+preparing
+
+This state occurs during query optimization.
+
+Purging old relay logs
+
+The thread is removing unneeded relay log files.
+
+query end
+
+This state occurs after processing a query but before the freeing items state.
+
+Reading from net
+
+The server is reading a packet from the network.
+
+Removing duplicates
+
+The query was using SELECT DISTINCT in such a way that MySQL could not optimize away the distinct operation at an early stage. Because of this, MySQL requires an extra stage to remove all duplicated rows before sending the result to the client.
+
+removing tmp table
+
+The thread is removing an internal temporary table after processing a SELECT statement. This state is not used if no temporary table was created.
+
+rename
+
+The thread is renaming a table.
+
+rename result table
+
+The thread is processing an ALTER TABLE statement, has created the new table, and is renaming it to replace the original table.
+
+Reopen tables
+
+The thread got a lock for the table, but noticed after getting the lock that the underlying table structure changed. It has freed the lock, closed the table, and is trying to reopen it.
+
+Repair by sorting
+
+The repair code is using a sort to create indexes.
+
+Repair done
+
+The thread has completed a multi-threaded repair for a MyISAM table.
+
+Repair with keycache
+
+The repair code is using creating keys one by one through the key cache. This is much slower than Repair by sorting.
+
+Rolling back
+
+The thread is rolling back a transaction.
+
+Saving state
+
+For MyISAM table operations such as repair or analysis, the thread is saving the new table state to the .MYI file header. State includes information such as number of rows, the AUTO_INCREMENT counter, and key distributions.
+
+Searching rows for update
+
+The thread is doing a first phase to find all matching rows before updating them. This has to be done if the UPDATE is changing the index that is used to find the involved rows.
+
+Sending data
+
+The thread is processing rows for a SELECT statement and also is sending data to the client.
+
+setup
+
+The thread is beginning an ALTER TABLE operation.
+
+Sorting for group
+
+The thread is doing a sort to satisfy a GROUP BY.
+
+Sorting for order
+
+The thread is doing a sort to satisfy a ORDER BY.
+
+Sorting index
+
+The thread is sorting index pages for more efficient access during a MyISAM table optimization operation.
+
+Sorting result
+
+For a SELECT statement, this is similar to Creating sort index, but for non-temporary tables.
+
+statistics
+
+The server is calculating statistics to develop a query execution plan.
+
+System lock
+
+The thread is going to request or is waiting for an external system lock for the table. If you are not using multiple mysqld servers that are accessing the same tables, you can disable system locks with the --skip-external-locking option.
+
+Table lock
+
+The next thread state after System lock. The thread has acquired an external lock and is going to request an internal table lock.
+
+Updating
+
+The thread is searching for rows to update and is updating them.
+
+updating main table
+
+The server is executing the first part of a multiple-table update. It is updating only the first table, and saving fields and offsets to be used for updating the other (reference) tables.
+
+updating reference tables
+
+The server is executing the second part of a multiple-table update and updating the matched rows from the other tables.
+
+User lock
+
+The thread is going to request or is waiting for an advisory lock requested with a GET_LOCK() call.
+
+Waiting for tables, Waiting for table
+
+The thread got a notification that the underlying structure for a table has changed and it needs to reopen the table to get the new structure. However, to reopen the table, it must wait until all other threads have closed the table in question.
+
+This notification takes place if another thread has used FLUSH TABLES or one of the following statements on the table in question: FLUSH TABLES tbl_name, ALTER TABLE, RENAME TABLE, REPAIR TABLE, ANALYZE TABLE, or OPTIMIZE TABLE.
+
+Waiting on cond
+
+A generic state in which the the thread is waiting for a condition to become true. No specific state information is available.
+
+Writing to net
+
+The server is writing a packet to the network
+
