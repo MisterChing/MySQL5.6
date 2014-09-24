@@ -1,0 +1,41 @@
+　　有句话说得好：“选择最好的不一定是最好的选择!”。AutoMySQLBackup算不上出类拔萃，但作为轻量级MySQL备份方案，对一些迷你项目而言，它绝对值得尝试。
+　　AutoMySQLBackup使用起来简单方便，属于快餐型工具，操作步骤如下：
+　　下载AutoMySQLBackup，是一个名字类似automysqlbackup-VERSION.sh的shell脚本。
+　　创建配置文件，缺省内容就是shell脚本中“START CFG”和“END CFG”之间的部分：
+　　# mkdir /etc/automysqlbackup
+　　# sed -n "/START CFG/,/END CFG/p" /path/to/automysqlbackup-VERSION.sh \
+　　> /etc/automysqlbackup/automysqlbackup.conf
+　　包含基本选项和高级选项两部分，主要设置基本选项，如下所示：
+　　# Username to access the MySQL server e.g. dbuser
+　　USERNAME=debian
+　　# Password to access the MySQL server e.g. password
+　　PASSWORD=
+　　# Host name (or IP address) of MySQL server e.g localhost
+　　DBHOST=localhost
+　　# List of DBNAMES for Daily/Weekly Backup e.g. "DB1 DB2 DB3"
+　　DBNAMES="all"
+　　# Backup directory location e.g /backups
+　　BACKUPDIR="/srv/backup/db"
+　　# Mail setup
+　　# What would you like to be mailed to you?
+　　# - log : send only log file
+　　# - files : send log file and sql files as attachments (see docs)
+　　# - stdout : will simply output the log to the screen if run manually.
+　　# - quiet : Only send logs if an error occurs to the MAILADDR.
+　　MAILCONTENT="log"
+　　# Set the maximum allowed email size in k. (4000 = approx 5MB email [see docs])
+　　MAXATTSIZE="4000"
+　　# Email Address to send mail to? (user@domain.com)
+　　MAILADDR="maintenance@example.com"
+　　按部就班的设置USERNAME，PASSWORD，DBNAMES，BACKUPDIR，唯一需要说明的是邮件相关的设置，作为轻量级MySQL备份方案，此功能显得有点画蛇添足，建议关闭：
+　　MAILCONTENT="stdout"
+　　当然，如果需要邮件通知功能，并且操作系统里安装配置了诸如sendmail或postfix之类的MTA软件，那么也可以按文档说明设置成log，files，quiet等值。
+　　万事俱备，只欠东风，接着设置定时任务，比如说设定每天备份：
+　　# cp /path/to/automysqlbackup-VERSION.sh /etc/cron.daily/automysqlbackup
+　　# chmod +x /etc/cron.daily/automysqlbackup
+　　如此一来，就大功告成了，会在你设定的备份目录中按日，周，月来存档。
+　　提示：每天备份，日积月累可能会占用大量的磁盘空间，为了避免磁盘空间耗尽，定期删除旧的备份文件是必要的，比如删除N天前的备份文件，可以使用类似下面的shell命令：
+　　# find /path/to/backup/dir -type f -mtime +N -delete
+　　# find /path/to/backup/dir -type f -mtime +N -exec rm -f '{}' \;
+　　# find /path/to/backup/dir -type f -mtime +N | xargs rm -f
+　　另外要注意搭配mtime时，N/-N/+N的含义易混淆，大家可以参考相关文档后再使用。
