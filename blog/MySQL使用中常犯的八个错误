@@ -1,0 +1,320 @@
+mysql用了这么多年，有很多细节都没有注意过。
+　　今天总结一下吧：
+　　1.NULL的使用
+　　在sql语句中，NULL 和任何东西都不相等，甚至二个NULL都不是相等的。
+　　mysql> SELECT NULL=NULL;
+　　+-----------+
+　　| NULL=NULL |
+　　+-----------+
+　　| NULL |
+　　+-----------+
+　　1 row IN SET (0.00 sec)
+　　mysql> SELECT NULL != NULL;
+　　+--------------+
+　　| NULL != NULL |
+　　+--------------+
+　　| NULL |
+　　+--------------+
+　　1 row IN SET (0.00 sec)
+　　看下面这张表：
+　　mysql> SELECT * FROM a;
+　　+-------+----------+----------+
+　　| uid | userfen | username |
+　　+-------+----------+----------+
+　　| 1 | 1000 | admin |
+　　| 0 | 35451752 | NULL |
+　　| 0 | 35451752 | NULL |
+　　| 0 | 35451752 | NULL |
+　　| 22222 | 2392032 | NULL |
+　　+-------+----------+----------+
+　　5 rows IN SET (0.00 sec)
+　　mysql> SELECT * FROM a WHERE username=NULL;
+　　Empty SET (0.00 sec)
+　　正确的方法是使用 IS NULL和IS NOT NULL
+　　mysql> SELECT * FROM a WHERE username IS NULL;
+　　+-------+----------+----------+
+　　| uid | userfen | username |
+　　+-------+----------+----------+
+　　| 0 | 35451752 | NULL |
+　　| 0 | 35451752 | NULL |
+　　| 0 | 35451752 | NULL |
+　　| 22222 | 2392032 | NULL |
+　　+-------+----------+----------+
+　　4 rows IN SET (0.00 sec)
+　　mysql> SELECT * FROM a WHERE username IS NOT NULL;
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 1000 | admin |
+　　+-----+---------+----------+
+　　1 row IN SET (0.00 sec)
+　　2.LEFT JOIN的使用
+　　mysql> SELECT * FROM a;
+　　+-------+---------+----------+
+　　| uid | userfen | username |
+　　+-------+---------+----------+
+　　| 1 | 1000 | admin |
+　　| 22222 | 2392032 | NULL |
+　　+-------+---------+----------+
+　　2 rows IN SET (0.00 sec)
+　　mysql> SELECT * FROM b;
+　　+----------+-------+
+　　| password | uid_a |
+　　+----------+-------+
+　　| abcd | 1 |
+　　+----------+-------+
+　　1 row IN SET (0.00 sec)
+　　mysql> SELECT * FROM a LEFT JOIN b ON a.uid=b.uid_a WHERE b.password='abcd';
+　　+-----+---------+----------+----------+-------+
+　　| uid | userfen | username | password | uid_a |
+　　+-----+---------+----------+----------+-------+
+　　| 1 | 1000 | admin | abcd | 1 |
+　　+-----+---------+----------+----------+-------+
+　　1 row IN SET (0.00 sec)
+　　mysql> SELECT * FROM a LEFT JOIN b ON a.uid=b.uid_a AND b.password='abcd';
+　　+-------+---------+----------+----------+-------+
+　　| uid | userfen | username | password | uid_a |
+　　+-------+---------+----------+----------+-------+
+　　| 1 | 1000 | admin | abcd | 1 |
+　　| 22222 | 2392032 | NULL | NULL | NULL |
+　　+-------+---------+----------+----------+-------+
+　　2 rows IN SET (0.00 sec)
+　　WHERE 语句是在left join完成之后才执行的，所以它匹配不到NULL的行。
+　　ON语句是在left join之前执行。
+　　3.小于某值，但是不为NULL
+　　mysql> select * from a;
+　　+-------+---------+----------+
+　　| uid | userfen | username |
+　　+-------+---------+----------+
+　　| 1 | 1000 | admin |
+　　| 22222 | 2392032 | NULL |
+　　+-------+---------+----------+
+　　2 rows in set (0.00 sec)
+　　mysql> select * from a where username<'z' and username IS NOT NULL;
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 1000 | admin |
+　　+-----+---------+----------+
+　　1 row in set (0.00 sec)
+　　mysql> select * from a where username<'z';
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 1000 | admin |
+　　+-----+---------+----------+
+　　1 row in set (0.00 sec)
+　　可以看出 IS NOT NULL 是多余的判断。
+　　如果username为NULL的话，那username肯定不会 < 'z'。
+　　因为所有东西与NULL进行比较，结果都是NULL。
+　　NULL不比任何值小。。也不比任何值大。。。。
+　　4.JOIN与NULL
+　　mysql> SELECT * FROM a;
+　　+-------+---------+----------+
+　　| uid | userfen | username |
+　　+-------+---------+----------+
+　　| 1 | 1000 | admin |
+　　| 22222 | 2392032 | NULL |
+　　+-------+---------+----------+
+　　2 rows IN SET (0.00 sec)
+　　mysql> SELECT * FROM b;
+　　+----------+-------+
+　　| password | uid_a |
+　　+----------+-------+
+　　| NULL | 1 |
+　　| abc | 1 |
+　　+----------+-------+
+　　2 rows IN SET (0.00 sec)
+　　mysql> SELECT * FROM a JOIN b ON a.username = b.password;
+　　Empty SET (0.00 sec)
+　　mysql> SELECT * FROM a JOIN b ON a.username = b.password OR (a.username IS NULL AND b.password IS NULL);
+　　+-------+---------+----------+----------+-------+
+　　| uid | userfen | username | password | uid_a |
+　　+-------+---------+----------+----------+-------+
+　　| 22222 | 2392032 | NULL | NULL | 1 |
+　　+-------+---------+----------+----------+-------+
+　　1 row IN SET (0.00 sec)
+　　如果刚好二个字段同时为NULL， NULL = NULL 又不成立，所以就是Empty set了。
+　　5.IN与NULL
+　　mysql> SELECT * FROM a;
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 1000 | admin |
+　　+-----+---------+----------+
+　　1 row IN SET (0.00 sec)
+　　mysql> SELECT * FROM b;
+　　+----------+-------+
+　　| password | uid_a |
+　　+----------+-------+
+　　| NULL | 1 |
+　　+----------+-------+
+　　1 row IN SET (0.01 sec)
+　　mysql> SELECT * FROM a WHERE a.username NOT IN (SELECT password FROM b );
+　　Empty SET (0.00 sec)
+　　mysql> SELECT * FROM a WHERE NOT EXISTS (SELECT NULL FROM b WHERE b.password=a.username );
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 1000 | admin |
+　　+-----+---------+----------+
+　　1 row IN SET (0.00 sec)
+　　IN与NULL也不兼容。
+　　貌似前五点都在说NULL。。。
+　　6.rand()
+　　mysql> SELECT * FROM a;
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 1000 | admin |
+　　| 4 | 4000 | jj |
+　　| 3 | 3000 | huarong |
+　　| 2 | 2000 | MODIFY |
+　　+-----+---------+----------+
+　　4 rows IN SET (0.00 sec)
+　　mysql> SELECT * FROM a ORDER BY rand() ASC, userfen ASC LIMIT 2;
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 4 | 4000 | jj |
+　　| 3 | 3000 | huarong |
+　　+-----+---------+----------+
+　　2 rows IN SET (0.01 sec)
+　　mysql> SELECT * FROM a ORDER BY rand() ASC, userfen ASC LIMIT 2;
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 1000 | admin |
+　　| 4 | 4000 | jj |
+　　+-----+---------+----------+
+　　2 rows IN SET (0.00 sec)
+　　上面的语句试图选出随机的2条记录，并按照userfen字段排序，但是排序有时候无效。
+　　这是因为：order by a,b 只有在a的值相同的情况下，才会再去order by b，否则就无视b。
+　　order by rand(), userfen，只有在某几次rand()取到的值相同的时候，才会对这些rand()值相同的记录按照userfen排序。。。
+　　mysql> SELECT * FROM (SELECT * FROM a ORDER BY rand() ASC LIMIT 2) b ORDER BY userfen ASC ;
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 1000 | admin |
+　　| 3 | 3000 | huarong |
+　　+-----+---------+----------+
+　　2 rows IN SET (0.00 sec)
+　　注意要把LIMIT写到rand()那里。不要写到最后面。
+　　7.DISTINCT
+　　mysql> SELECT * FROM a;
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 1000 | admin |
+　　| 4 | 4000 | admin |
+　　| 3 | 3000 | MODIFY |
+　　| 2 | 2000 | MODIFY |
+　　+-----+---------+----------+
+　　4 rows IN SET (0.00 sec)
+　　mysql> SELECT DISTINCT(username), userfen FROM a;
+　　+----------+---------+
+　　| username | userfen |
+　　+----------+---------+
+　　| admin | 1000 |
+　　| admin | 4000 |
+　　| MODIFY | 3000 |
+　　| MODIFY | 2000 |
+　　+----------+---------+
+　　4 rows IN SET (0.47 sec)
+　　distinct 会应用到select中的所有字段。。。。。
+　　而且distinct也不是一个函数，() 写不写都行。
+　　SELECT DISTINCT可以看成是一个特殊的SELECT语句。
+　　mysql> SELECT * FROM a;
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 4000 | admin |
+　　| 4 | 4000 | admin |
+　　| 3 | 3000 | MODIFY |
+　　| 2 | 2000 | MODIFY |
+　　+-----+---------+----------+
+　　4 rows IN SET (0.00 sec)
+　　mysql> SELECT DISTINCT username, userfen FROM a;
+　　+----------+---------+
+　　| username | userfen |
+　　+----------+---------+
+　　| admin | 4000 |
+　　| MODIFY | 3000 |
+　　| MODIFY | 2000 |
+　　+----------+---------+
+　　3 rows IN SET (0.00 sec)
+　　其实这种情况下，应该是使用GROUP BY。
+　　mysql> SELECT * FROM a;
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 1000 | admin |
+　　| 4 | 4000 | admin |
+　　| 3 | 3000 | MODIFY |
+　　| 2 | 2000 | MODIFY |
+　　+-----+---------+----------+
+　　4 rows IN SET (0.00 sec)
+　　mysql> SELECT username,userfen FROM a GROUP BY username;
+　　+----------+---------+
+　　| username | userfen |
+　　+----------+---------+
+　　| admin | 1000 |
+　　| MODIFY | 3000 |
+　　+----------+---------+
+　　2 rows IN SET (0.00 sec)
+　　8.IN 与 FIND_IN_SET
+　　mysql> SELECT * FROM a;
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 1000 | admin |
+　　| 4 | 4000 | admin |
+　　| 3 | 3000 | MODIFY |
+　　| 2 | 2000 | MODIFY |
+　　+-----+---------+----------+
+　　4 rows IN SET (0.00 sec)
+　　mysql> SELECT * FROM a WHERE uid IN ('1,2,4');
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 1000 | admin |
+　　+-----+---------+----------+
+　　1 row IN SET, 1 warning (0.00 sec)
+　　mysql> SHOW warnings;
+　　+---------+------+-------------------------------------------+
+　　| Level | Code | Message |
+　　+---------+------+-------------------------------------------+
+　　| Warning | 1292 | Truncated incorrect DOUBLE value: '1,2,4' |
+　　+---------+------+-------------------------------------------+
+　　1 row IN SET (0.00 sec)
+　　mysql> SELECT * FROM a WHERE uid IN (1,2,4);
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 1000 | admin |
+　　| 4 | 4000 | admin |
+　　| 2 | 2000 | MODIFY |
+　　+-----+---------+----------+
+　　3 rows IN SET (0.10 sec)
+　　mysql> SELECT '1' IN ('1,2,3');
+　　+------------------+
+　　| '1' IN ('1,2,3') |
+　　+------------------+
+　　| 0 |
+　　+------------------+
+　　1 row IN SET (0.00 sec)
+　　mysql> SELECT 1 IN ('1,2,3');
+　　+----------------+
+　　| 1 IN ('1,2,3') |
+　　+----------------+
+　　| 1 |
+　　+----------------+
+　　mysql> SELECT * FROM a WHERE find_in_set (uid , '1,2,4');
+　　+-----+---------+----------+
+　　| uid | userfen | username |
+　　+-----+---------+----------+
+　　| 1 | 1000 | admin |
+　　| 4 | 4000 | admin |
+　　| 2 | 2000 | MODIFY |
+　　+-----+---------+----------+
+　　3 rows IN SET (0.05 sec)
