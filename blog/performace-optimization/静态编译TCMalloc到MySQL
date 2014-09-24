@@ -1,0 +1,122 @@
+　　Linux下的malloc函数性能问题，想必大部分在Linux下写C的人都深有感受，纷纷利用内存池来改进内存分配效率。
+　　Google开源的tcmalloc则改进了malloc的一些效率问题，在大量malloc和free时，操作系统的内存曲线明显比Linux下malloc函数要平稳，在大并发情况下，提升程序稳定性和性能。
+　　一般网上都是把tcmalloc动态库加到mysqld_safe中启动，但是我们的MySQL都是静态编译的，这时候动态加载是否生效呢?所以还是静态编译入MySQL好。
+　　编译tcmalloc先要编译libunwind：
+　　wget http://download.savannah.gnu.org/releases/libunwind/libunwind-0.99.tar.gz 
+　　tar zxvf libunwind-0.99.tar.gz 
+　　CHOST=”x86_64-pc-linux-gnu” \ 
+　　CFLAGS=” -O3 -fPIC \ 
+　　-fomit-frame-pointer \ 
+　　-pipe \ 
+　　-march=nocona \ 
+　　-mfpmath=sse \ 
+　　-m128bit-long-double \ 
+　　-mmmx \ 
+　　-msse \ 
+　　-msse2 \ 
+　　-maccumulate-outgoing-args \ 
+　　-m64 \ 
+　　-ftree-loop-linear \ 
+　　-fprefetch-loop-arrays \ 
+　　-freg-struct-return \ 
+　　-fgcse-sm \ 
+　　-fgcse-las \ 
+　　-frename-registers \ 
+　　-fforce-addr \ 
+　　-fivopts \ 
+　　-ftree-vectorize \ 
+　　-ftracer \ 
+　　-frename-registers \ 
+　　-minline-all-stringops \ 
+　　-fbranch-target-load-optimize2″ \ 
+　　CXXFLAGS=”${CFLAGS}” \ 
+　　./configure && make && make install
+　　然后编译tcmalloc：
+　　tar zxvf google-perftools-1.6.tar.gz 
+　　CHOST=”x86_64-pc-linux-gnu” \ 
+　　CFLAGS=” -O3 \ 
+　　-fomit-frame-pointer \ 
+　　-pipe \ 
+　　-march=nocona \ 
+　　-mfpmath=sse \ 
+　　-m128bit-long-double \ 
+　　-mmmx \ 
+　　-msse \ 
+　　-msse2 \ 
+　　-maccumulate-outgoing-args \ 
+　　-m64 \ 
+　　-ftree-loop-linear \ 
+　　-fprefetch-loop-arrays \ 
+　　-freg-struct-return \ 
+　　-fgcse-sm \ 
+　　-fgcse-las \ 
+　　-frename-registers \ 
+　　-fforce-addr \ 
+　　-fivopts \ 
+　　-ftree-vectorize \ 
+　　-ftracer \ 
+　　-frename-registers \ 
+　　-minline-all-stringops \ 
+　　-fbranch-target-load-optimize2″ \ 
+　　CXXFLAGS=”${CFLAGS}” \ 
+　　./configure && make && make install
+　　记得要把libtammloc加入系统路径，否则编译MySQL时找不到：
+　　echo “/usr/local/lib” > /etc/ld.so.conf.d/usr_local_lib.conf
+　　/sbin/ldconfig
+　　最后就是编译MySQL了：
+　　CXX=gcc \ 
+　　CHOST=”x86_64-pc-linux-gnu” \ 
+　　CFLAGS=” -O3 \ 
+　　-fomit-frame-pointer \ 
+　　-pipe \ 
+　　-march=nocona \ 
+　　-mfpmath=sse \ 
+　　-m128bit-long-double \ 
+　　-mmmx \ 
+　　-msse \ 
+　　-msse2 \ 
+　　-maccumulate-outgoing-args \ 
+　　-m64 \ 
+　　-ftree-loop-linear \ 
+　　-fprefetch-loop-arrays \ 
+　　-freg-struct-return \ 
+　　-fgcse-sm \ 
+　　-fgcse-las \ 
+　　-frename-registers \ 
+　　-fforce-addr \ 
+　　-fivopts \ 
+　　-ftree-vectorize \ 
+　　-ftracer \ 
+　　-frename-registers \ 
+　　-minline-all-stringops \ 
+　　-felide-constructors \ 
+　　-fno-exceptions \ 
+　　-fno-rtti \ 
+　　-fbranch-target-load-optimize2″ \ 
+　　CXXFLAGS=”${CFLAGS}” \ 
+　　./configure –prefix=/usr/alibaba/install/mysql-ent-custom-5.1.49sp1 \ 
+　　–with-server-suffix=-alibaba-edition \ 
+　　–with-mysqld-user=mysql \ 
+　　–with-plugins=partition,blackhole,csv,heap,innobase,myisam,myisammrg \ 
+　　–with-charset=utf8 \ 
+　　–with-collation=utf8_general_ci \ 
+　　–with-extra-charsets=gbk,gb2312,utf8,ascii \ 
+　　–with-big-tables \ 
+　　–with-fast-mutexes \ 
+　　–with-zlib-dir=bundled \ 
+　　–enable-assembler \ 
+　　–enable-profiling \ 
+　　–enable-local-infile \ 
+　　–enable-thread-safe-client \ 
+　　–with-readline \ 
+　　–with-pthread \ 
+　　–with-embedded-server \ 
+　　–with-client-ldflags=-all-static \ 
+　　–with-mysqld-ldflags=-all-static \ 
+　　–with-mysqld-ldflags=-ltcmalloc \ 
+　　–without-query-cache \ 
+　　–without-geometry \ 
+　　–without-debug \ 
+　　–without-ndb-debug 
+　　make && make install
+　　经过试用，大并发下内存分配和释放曲线都比Linux原生的平稳。
