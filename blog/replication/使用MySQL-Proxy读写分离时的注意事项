@@ -1,0 +1,76 @@
+　　在动手操作前最好先安装好MySQL-Proxy，并配置好MySQL主从服务器。
+　　延迟问题
+　　读写分离不能回避的问题之一就是延迟，可以考虑Google提供的SemiSyncReplicationDesign补丁。
+　　端口问题
+　　MySQL-Proxy缺省使用的是4040端口，如果你想透明的把3306端口的请求转发给4040的话，那么可以：
+　　iptables -t nat -I PREROUTING -s ! 127.0.0.1 -p tcp --dport 3306 -j REDIRECT --to-ports 4040
+　　如果想删除这条规则，可以把上面例子中的-I换成-D。
+　　密码加密方式
+　　MySQL-Proxy不支持老的密码加密方式，所以如果你使用的是老版本的MySQL，或者启用了old_passwords选项的话，则可能会出现错误：
+　　ERROR 2013: Lost connection to MySQL server
+　　此时最好的修复方法就是使用新的密码加密方式，如果你的用户表是老式的，可能需要先运行MySQL源代码里scripts目录下的mysql_fix_privilege_tables脚本升级表结构。有时候客观情况可能不允许立刻进行升级操作，此时可以为MySQL-Proxy专门建立一个密码为空的用户(通过主机限制访问，或者起一个很复杂的用户名)，因为不管是新的密码加密方式还是旧的密码加密方式，空密码都同样是一个空字符串，这样就规避了密码加密的问题。
+　　查询乱码
+　　连接上MySQL-Proxy后，执行查询时，随机出现乱码。出现此问题的原因是当我们使用MySQL-Proxy读写分离时，通常会有多个后端服务器，客户端发出查询请求时，一般会先发出一条类似”SET NAME gbk”的语句来声明客户端编码，然后再发出实际查询的SQL语句，但MySQL-Proxy可能会把这两条语句分发给不同的后端服务器，于是就出现了乱码。
+　　解决方法是强行指定后端服务器的字符编码：
+　　init-connect='SET NAME gbk'
+　　default-character-set=gbk
+　　skip-character-set-client-handshake
+　　如果使用init-connect，则需要注意操作用户不能有SUPER权限，否则此选项无效。
+　　即便做好了以上的设置后，还有可能会出现乱码，比如说数据库是gbk的，当我们用PHPMyAdmin连接MySQL-Proxy时，查询还是会出现乱码，不过这是正常的!因为PHPMyAdmin使用的是utf8编码，它发出的“SET NAMES utf8”语句被skip-character-set-client-handshake屏蔽了，所以出现乱码。
+　　进程崩溃
+　　MySQL-Proxy偶尔会出现进程崩溃的情况，具体原因不明。
+　　新版的MySQL-Proxy为了应付这个问题加入了一个keepalive选项(try to restart the proxy if it crashed)，当使用这个选项时，会先后启动两个mysql-proxy进程，先启动的mysql-proxy进程用来监控后启动的mysql-proxy进程，实际提供服务的是后启动的mysql-proxy进程，一旦后启动的mysql-proxy进程挂掉(你可以自己kill试试)，先启动的mysql-proxy进程会重新启动一个mysql-proxy提供服务。
+　　不过现在很多人用的还是旧版的MySQL-Proxy，此时可以利用init来实现类似keepalive的效果：
+　　编写脚本/usr/local/sbin/mysql-proxy.sh，加入以下内容(具体写法视安装情况而定)：
+　　LUA_PATH="/usr/local/mysql-proxy/share/mysql-proxy/?.lua" \ 
+　　/usr/local/mysql-proxy/sbin/mysql-proxy \ 
+　　--proxy-backend-addresses=192.168.0.1:3306 \ 
+　　--proxy-read-only-backend-addresses=192.168.0.2:3306 \ 
+　　--proxy-lua-script=/usr/local/mysql-proxy/share/mysql-proxy/rw-splitting.lua
+　　别忘了加上可执行属性：
+　　chmod a+x /usr/local/sbin/mysql-proxy.sh
+　　0.7.0版本有一个新的选项：–defaults-file，可以把相关信息都写到配置文件里：
+　　# MySQL Proxy’s configuration file (mysql-proxy.cnf) 
+　　[mysql-proxy] 
+　　daemon = true 
+　　keepalive = true 
+　　proxy-backend-addresses = 192.168.0.1:3306 
+　　proxy-read-only-backend-addresses = 192.168.0.2:3306 
+　　proxy-lua-script = /usr/local/mysql-proxy/share/mysql-proxy/rw-splitting.lua
+　　启动时可以使用：mysql-proxy –defaults-file=mysql-proxy.cnf
+　　修改inittab：
+　　vi /etc/inittab
+　　加入以下内容：
+　　mp:12345:respawn:/usr/local/sbin/mysql-proxy.sh
+　　然后让init重新读取inittab内容：
+　　kill -HUP 1
+　　系统会自动检测/usr/local/sbin/mysql-proxy.sh是否正在运行，如果没有就自动运行。
+　　需要注意的是在编写mysql-proxy.sh脚本的时候，不要加入–daemon选项，否则/usr/local/sbin/mysql-proxy.sh一运行就结束了，系统会不停的尝试运行脚本，从而在/var/log/message里留下大量的错误信息(init: Id “mp” respawning too fast: disabled for 5 minutes)。
+　　init的方法可能显得有点另类了，可以使用其他的工具，比如svscan。
+　　有状态的查询
+　　一些有状态的特殊的查询可能失效，比如说：
+　　SELECT SQL_CALC_FOUND_ROWS ..
+　　SELECT FOUND_ROWS()
+　　这种查询是有状态的，应该保证在同一个后端处理，查看rw-splitting.lua脚本可以看到MySQL-Proxy实际上已经对这样的查询进行了 判断，但在实际应用中发现还是存在问题。估计是脚本写得不咋地，实际应用中，建议大家不要使用这样的查询，一来没有可移植性，而来效率也不见得好。
+　　另一个可能会产生问题的查询是：
+　　INSERT … (AUTO_INCREMENT)
+　　SELECT LAST_INSERT_ID()
+　　当系统执行完INSERT后，再执行SELECT时，可能已经被分发到了不同的后端服务器，如果你使用的编程语言是PHP的话，此时应该通过 mysql_insert_id()来得到最新插入的id，每次INSERT结束后，其实对应的autoincrement值就已经计算好返回给PHP 了，你无需再发出一次独立的查询，直接用mysql_insert_id()就可以了。不过很多PHP程序使用的都是SELECT LAST_INSERT_ID()的方式，如AdbDB，CakePHP等等，如果你正在使用它们的话需多加小心。(当使用bigint 时，mysql_insert_id()存在问题，详情见手册，不过对于大多数人而言，bigint基本不会遇到，所以你可以无视这个问题)
+　　注：对于这两个问题，官方BUG库里有人给出了相应的补丁。
+　　脚本问题
+　　MySQL-Proxy读写分离的功能是通过lua脚本(rw-splitting.lua)实现的，但是这个脚本年久失修，问题多多，比如说使用时可能会出现：
+　　ERROR 1105: can't change DB to on slave
+　　出现这个问题的原因在于当客户端发出查询时，MySQL-Proxy会比较当前客户端所处数据库和服务器所处数据库是否一致，如果不一致则会在服务端尝试执行一个”USE 数据库”的操作，一个可能性是主从服务器的数据库结构不同，在USE一个不存在的数据库的时候自然会出错，还有一个原因有些查询操作并没有所处数据库这个上下文，比如说SHOW DATABASES这个查询，并不需要事先“USE 数据库”，只要连上服务器就可以执行，这时候如果还尝试同步客户端和服务端所处的数据库，出错就是无法避免的事了。
+　　rw-splitting.lua恰恰没有屏蔽后者所描述的情况，修复方法如下，仔细看277行，
+　　276 if cmd.type ~= proxy.COM_INIT_DB and 
+　　277 c.default_db and c.default_db ~= "" and c.default_db ~= s.default_db then 
+　　if is_debug 
+　　278 print(" server default db: " .. s.default_db) 
+　　279 print(" client default db: " .. c.default_db) 
+　　280 print(" syncronizing") 
+　　end 
+　　281 proxy.queries:prepend(2, string.char(proxy.COM_INIT_DB) .. c.default_db) 
+　　282 end
+　　在lua中，~=是不等于的意思，另外，lua里空字符串”"用在if里被认为是true，所以单靠c.default_db不够。
+　　顺手加上is_debug的判断，不然即使不是debug状态，服务器的命令行里也会偶尔冒出一些调试信息。
+　　此外，新版MySQL-Proxy里，虽然源代码包里有rw-splitting.lua脚本，但缺省并没有安装，你需要手动拷贝，而且数据结构发生了变化，脚本需要按照数据结构的变化做出适当的修改，可以参考作者的描述操作，或者参考官方Bug管理或者直接下载。值得期待的是现在有了专门的MySQL-Proxy-Lua-Scripts项目，希望开发进度能跟上来。
