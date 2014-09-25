@@ -1,0 +1,640 @@
+参考资料：
+http://www.clusterdb.com/mysql/replication-and-auto-failover-made-easy-with-mysql-utilities
+
+环境介绍:
+master: demoenv-trial-1
+slaves: demoenv-trial-2 demoenv-trial-3
+
+1. 安装 Percona Server，在所有服务器上：
+$ sudo yum install http://www.percona.com/downloads/percona-release/percona-release-0.0-1.x86_64.rpm
+$ sudo yum install Percona-Server-shared-compat
+$ sudo yum install Percona-Server-server-56
+
+$ sudo yum install http://dl.fedoraproject.org/pub/epel/6/x86_64/epel-release-6-8.noarch.rpm
+$ sudo yum install mysql-utilities
+
+2. 配置 /etc/my.cnf，在所有服务器上：
+注意：确保 server-id 不同且 report-host 与自身主机名相同
+$ sudo vim /etc/my.cnf
+
+01
+[mysqld]
+02
+# basic setting
+03
+datadir = /opt/mysql/data
+04
+tmpdir = /opt/mysql/tmp
+05
+socket = /opt/mysql/run/mysqld.sock
+06
+port = 3306
+07
+pid-file = /opt/mysql/run/mysqld.pid
+08
+ 
+09
+# innodb setting
+10
+default-storage-engine = INNODB
+11
+innodb_file_per_table = 1
+12
+log-bin = /opt/mysql/binlogs/bin-log-mysqld
+13
+log-bin-index = /opt/mysql/binlogs/bin-log-mysqld.index
+14
+innodb_data_home_dir = /opt/mysql/data
+15
+innodb_data_file_path = ibdata1:10M:autoextend
+16
+innodb_log_group_home_dir = /opt/mysql/data
+17
+binlog-do-db = testdb
+18
+ 
+19
+# server id
+20
+server-id=1
+21
+ 
+22
+# gtids setting
+23
+binlog-format = ROW
+24
+log-slave-updates = true
+25
+gtid-mode = on
+26
+enforce-gtid-consistency = true
+27
+report-host = demoenv-trial-1
+28
+report-port = 3306
+29
+master-info-repository = TABLE
+30
+relay-log-info-repository = TABLE
+31
+sync-master-info = 1
+32
+ 
+33
+# other settings
+34
+[mysqld_safe]
+35
+log-error = /opt/mysql/log/mysqld.log
+36
+pid-file = /opt/mysql/run/mysqld.pid
+37
+open-files-limit = 8192
+38
+ 
+39
+[mysqlhotcopy]
+40
+interactive-timeout
+41
+ 
+42
+[client]
+43
+port = 3306
+44
+socket = /opt/mysql/run/mysqld.sock
+45
+default-character-set = utf8
+3. 创建所需目录，在所有服务器上：
+$ sudo mkdir -p /opt/mysql/{data,tmp,run,binlogs,log}
+$ sudo chown mysql:mysql /opt/mysql/{data,tmp,run,binlogs,log}
+
+4. 初始化数据库，在所有服务器上：
+$ sudo -i
+# su - mysql
+$ mysql_install_db --user=mysql --datadir=/opt/mysql/data/
+$ exit
+# exit
+$ sudo /etc/init.d/mysql start
+
+5. 创建授权用户 root@'%' 以便通过 mysqlreplicate 来进行主从复制的配置，在所有服务器上：
+$ mysql -uroot
+
+1
+mysql> grant all on *.* to root@'%' identified by 'pass' with grant option;
+2
+mysql> quit;
+6. 创建复制所需的用户，在所有服务器上：
+$ mysql -uroot
+
+1
+mysql> grant replication slave on *.* to 'rpl'@'%' identified by 'rpl';
+2
+mysql> quit;
+7. 配置主从复制，可选择任意一台服务器操作：
+[dong.guo@demoenv-trial-1 ~]$ mysql -uroot
+
+1
+mysql> use mysql;
+2
+mysql> drop user root@'demoenv-trial-1';
+3
+mysql> quit;
+[dong.guo@demoenv-trial-1 ~]$ mysqlreplicate --master=root:pass@'demoenv-trial-1':3306 --slave=root:pass@'demoenv-trial-2':3306 --rpl-user=rpl:rpl
+
+1
+# master on demoenv-trial-1: ... connected.
+2
+# slave on demoenv-trial-2: ... connected.
+3
+# Checking for binary logging on master...
+4
+# set up replication...
+5
+# ...done.
+
+[dong.guo@demoenv-trial-1 ~]$ mysqlreplicate --master=root:pass@'demoenv-trial-1':3306 --slave=root:pass@'demoenv-trial-3':3306 --rpl-user=rpl:rpl
+
+1
+# master on demoenv-trial-1: ... connected.
+2
+# slave on demoenv-trial-3: ... connected.
+3
+# Checking for binary logging on master...
+4
+# set up replication...
+5
+# ...done.
+8. 验证主从复制的数据完整性
+[dong.guo@demoenv-trial-1 ~]$ mysql -uroot
+
+1
+mysql> create database testdb;
+2
+mysql> quit;
+[dong.guo@demoenv-trial-1 ~]$ mysql -uroot -ppass -h'demoenv-trial-2' -e 'show databases;'
+
+1
++-------------------+
+2
+| Database          |
+3
++-------------------+
+4
+| information_schema|
+5
+| mysql             |
+6
+| performance_schema|
+7
+| test              |
+8
+| testdb            |
+9
++-------------------+
+[dong.guo@demoenv-trial-1 ~]$ mysql -uroot -ppass -h'demoenv-trial-3' -e 'show databases;'
+
+1
++-------------------+
+2
+| Database          |
+3
++-------------------+
+4
+| information_schema|
+5
+| mysql             |
+6
+| performance_schema|
+7
+| test              |
+8
+| testdb            |
+9
++-------------------+
+[dong.guo@demoenv-trial-1 ~]$ mysqlrplshow --master=rpl:rpl@'demoenv-trial-1':3306 --discover-slaves-login=root:pass;
+
+1
+# master on demoenv-trial-1: ... connected.
+2
+# Finding slaves for master: demoenv-trial-1:3306
+3
+ 
+4
+# Replication Topology Graph
+5
+demoenv-trial-1:3306 (MASTER)
+6
+  |
+7
+   +--- demoenv-trial-2:3306 - (SLAVE)
+8
+  |
+9
+   +--- demoenv-trial-3:3306 - (SLAVE)
+[dong.guo@demoenv-trial-1 ~]$ mysqlrplcheck --master=root:pass@'demoenv-trial-1' --slave=root:pass@'demoenv-trial-2'
+
+01
+# master on demoenv-trial-1: ... connected.
+02
+# slave on demoenv-trial-2: ... connected.
+03
+Test Description                          Status
+04
+---------------------
+05
+Checking for binary logging on master     [pass]
+06
+Are there binlog exceptions?              [WARN]
+07
+ 
+08
++--------+--------+-----------+
+09
+| server | do_db  | ignore_db |
+10
++--------+--------+-----------+
+11
+| master | testdb |           |
+12
++--------+--------+-----------+
+13
+ 
+14
+Replication user exists?                  [pass]
+15
+Checking server_id values                 [pass]
+16
+Checking server_uuid values               [pass]
+17
+Is slave connected to master?             [pass]
+18
+Check master information file             [pass]
+19
+Checking InnoDB compatibility             [pass]
+20
+Checking storage engines compatibility    [pass]
+21
+Checking lower_case_table_names setting   [pass]
+22
+Checking slave delay (seconds behind master)                         [pass]
+23
+# ...done.  
+9. 关闭 master 测试 auto-failover
+[dong.guo@demoenv-trial-1 ~]$ mysqlfailover --master=root:pass@'demoenv-trial-1':3306 --discover-slaves-login=root:pass --rediscover
+
+01
+# Discovering slaves for master at demoenv-trial-1:3306
+02
+# Discovering slave at demoenv-trial-2:3306
+03
+# Found slave: demoenv-trial-2:3306
+04
+# Discovering slave at demoenv-trial-3:3306
+05
+# Found slave: demoenv-trial-3:3306
+06
+# Checking privileges.
+07
+# Discovering slaves for master at demoenv-trial-1:3306
+08
+MySQL Replication Failover Utility
+09
+Failover Mode = auto     Next Interval = Sun Oct 20 06:58:52 2013
+10
+ 
+11
+Master Information
+12
+------------------
+13
+Binary Log File       Position  Binlog_Do_DB  Binlog_Ignore_DB 
+14
+bin-log-mysqld.00000  299       testdb                         
+15
+ 
+16
+GTID Executed Set
+17
+92df196b-3906-11e3-b6b6-000c290d14d7:1
+18
+ 
+19
+Replication Health Status
+20
++-----------------+------+--------+-------+-----------+---------------+
+21
+| host            | port | role   | state | gtid_mode | health        |
+22
++-----------------+------+--------+-------+-----------+---------------+
+23
+| demoenv-trial-1 | 3306 | MASTER | UP    | ON        | OK            |
+24
+| demoenv-trial-2 | 3306 | SLAVE  | UP    | ON        | OK            |
+25
+| demoenv-trial-3 | 3306 | SLAVE  | UP    | ON        | OK            |
+26
++-----------------+------+--------+-------+-----------+---------------+
+27
+ 
+28
+Q-quit R-refresh H-health G-GTID Lists U-UUIDs
+然后，执行命令的终端就挂起了，需要另外开启一个终端来关闭master：
+[dong.guo@demoenv-trial-1 ~]$ mysqladmin -uroot -ppass shutdown
+
+接着，在刚刚挂起的终端上，可以看到：
+
+01
+Failover starting in 'auto' mode...
+02
+# Candidate slave demoenv-trial-2:3306 will become the new master.
+03
+# Checking slaves status (before failover).
+04
+# Preparing candidate for failover.
+05
+# Creating replication user if it does not exist.
+06
+# Stopping slaves.
+07
+# Performing STOP on all slaves.
+08
+# Switching slaves to new master.
+09
+# Disconnecting new master as slave.
+10
+# Starting slaves.
+11
+# Performing START on all slaves.
+12
+# Checking slaves for errors.
+13
+# Failover complete.
+14
+# Discovering slaves for master at demoenv-trial-2:3306
+15
+ 
+16
+Failover console will restart in 5 seconds.
+17
+ 
+18
+MySQL Replication Failover Utility
+19
+Failover Mode = auto     Next Interval = Sun Oct 20 07:01:25 2013
+20
+ 
+21
+Master Information
+22
+------------------
+23
+Binary Log File       Position  Binlog_Do_DB  Binlog_Ignore_DB 
+24
+bin-log-mysqld.00000  299       testdb                         
+25
+ 
+26
+GTID Executed Set
+27
+92df196b-3906-11e3-b6b6-000c290d14d7:1
+28
+ 
+29
+Replication Health Status
+30
++-----------------+------+--------+-------+-----------+---------------+
+31
+| host            | port | role   | state | gtid_mode | health        |
+32
++-----------------+------+--------+-------+-----------+---------------+
+33
+| demoenv-trial-2 | 3306 | MASTER | UP    | ON        | OK            |
+34
+| demoenv-trial-3 | 3306 | SLAVE  | UP    | ON        | OK            |
+35
++-----------------+------+--------+-------+-----------+---------------+
+36
+ 
+37
+Q-quit R-refresh H-health G-GTID Lists U-UUIDs
+服务器 'demoenv-trial-2' 变成了新的master。
+
+10. 插入数据测试主从复制
+[dong.guo@demoenv-trial-2 ~]$ mysql -uroot
+
+01
+mysql> use testdb;
+02
+Database changed
+03
+mysql> CREATE TABLE `hostgroup` (
+04
+    ->   `hostgroup_id` tinyint(4) NOT NULL AUTO_INCREMENT,
+05
+    ->   `hostgroup_name` char(20) DEFAULT NULL,
+06
+    ->   `hostgroup_next` tinyint(4) NOT NULL,
+07
+    ->   `colo_name` char(4) NOT NULL,
+08
+    ->   PRIMARY KEY (`hostgroup_id`)
+09
+    -> ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+10
+Query OK, 0 rows affected (0.10 sec)
+11
+ 
+12
+mysql> quit;
+[dong.guo@demoenv-trial-2 binlogs]$ mysql -uroot -ppass -h'demoenv-trial-3' testdb -e 'show tables;'
+
+1
++-----------------+
+2
+| Tables_in_testdb|
+3
++-----------------+
+4
+| hostgroup       |
+5
++-----------------+
+11. 尝试将旧的master恢复
+[dong.guo@demoenv-trial-1 ~]$ sudo /etc/init.d/mysql start
+[dong.guo@demoenv-trial-1 ~]$ mysqlreplicate --master=root:pass@'demoenv-trial-2':3306 --slave=root:pass@'demoenv-trial-1':3306
+
+1
+# master on demoenv-trial-2: ... connected.
+2
+# slave on demoenv-trial-1: ... connected.
+3
+# Checking for binary logging on master...
+4
+# setting up replication...
+5
+# ...done.
+在刚刚挂起的终端上，可以看到：
+
+01
+...
+02
+Replication Health Status
+03
++-----------------+------+--------+-------+-----------+---------------+
+04
+| host            | port | role   | state | gtid_mode | health        |
+05
++-----------------+------+--------+-------+-----------+---------------+
+06
+| demoenv-trial-2 | 3306 | MASTER | UP    | ON        | OK            |
+07
+| demoenv-trial-1 | 3306 | SLAVE  | UP    | ON        | OK            |
+08
+| demoenv-trial-3 | 3306 | SLAVE  | UP    | ON        | OK            |
+09
++-----------------+------+--------+-------+-----------+---------------+
+10
+ 
+11
+Q-quit R-refresh H-health G-GTID Lists U-UUIDs
+将旧的master恢复
+[dong.guo@demoenv-trial-1 ~]$ mysqlrpladmin --master=root:pass@'demoenv-trial-2':3306 --new-master=root:pass@'demoenv-trial-1':3306 --demote-master --discover-slaves-login=root:pass switchover
+
+01
+# Discovering slaves for master at demoenv-trial-2:3306
+02
+# Discovering slave at demoenv-trial-1:3306
+03
+# Found slave: demoenv-trial-1:3306
+04
+# Discovering slave at demoenv-trial-3:3306
+05
+# Found slave: demoenv-trial-3:3306
+06
+# Checking privileges.
+07
+# Performing switchover from master at demoenv-trial-2:3306 to slave at demoenv-trial-1:3306.
+08
+# Checking candidate slave prerequisites.
+09
+# Checking slaves configuration to master.
+10
+# Waiting for slaves to catch up to old master.
+11
+# Stopping slaves.
+12
+# Performing STOP on all slaves.
+13
+# Demoting old master to be a slave to the new master.
+14
+# Switching slaves to new master.
+15
+# Starting all slaves.
+16
+# Performing START on all slaves.
+17
+# Checking slaves for errors.
+18
+# Switchover complete.
+19
+#
+20
+# Replication Topology Health:
+21
++-----------------+------+--------+-------+-----------+---------------+
+22
+| host            | port | role   | state | gtid_mode | health        |
+23
++-----------------+------+--------+-------+-----------+---------------+
+24
+| demoenv-trial-1 | 3306 | MASTER | UP    | ON        | OK            |
+25
+| demoenv-trial-2 | 3306 | SLAVE  | UP    | ON        | OK            |
+26
+| demoenv-trial-3 | 3306 | SLAVE  | UP    | ON        | OK            |
+27
++-----------------+------+--------+-------+-----------+---------------+
+28
+# ...done.
+在刚刚挂起的终端上，可以看到：
+
+01
+MySQL Replication Failover Utility
+02
+Failover Mode = auto     Next Interval = Sun Oct 20 07:30:07 2013
+03
+ 
+04
+Master Information
+05
+------------------
+06
+Binary Log File       Position  Binlog_Do_DB  Binlog_Ignore_DB 
+07
+bin-log-mysqld.00000  710       testdb                         
+08
+ 
+09
+GTID Executed Set
+10
+8a58172b-1efd-11e3-8cf1-000c2950fe0c:1 [...]
+11
+ 
+12
+Replication Health Status
+13
++-----------------+------+--------+-------+-----------+----------------------------------+
+14
+| host            | port | role   | state | gtid_mode | health                           |
+15
++-----------------+------+--------+-------+-----------+----------------------------------+
+16
+| demoenv-trial-2 | 3306 | MASTER | UP    | ON        | OK                               |
+17
+| demoenv-trial-1 | 3306 | SLAVE  | UP    | WARN      | Slave is not connected to master.|
+18
+| demoenv-trial-3 | 3306 | SLAVE  | UP    | WARN      | Slave is not connected to master.|
+19
++-----------------+------+--------+-------+-----------+----------------------------------+
+20
+ 
+21
+Q-quit R-refresh H-health G-GTID Lists U-UUIDs
+可以看到failover在手动恢复了旧的master之后已经停止了工作。
+
+按下Q，然后重启auto-failover：
+[dong.guo@demoenv-trial-1 ~]$ mysqlfailover --master=root:pass@'demoenv-trial-1':3306 --discover-slaves-login=root:pass --rediscover
+
+01
+...
+02
+ 
+03
+Replication Health Status
+04
++-----------------+------+--------+-------+-----------+---------------+
+05
+| host            | port | role   | state | gtid_mode | health        |
+06
++-----------------+------+--------+-------+-----------+---------------+
+07
+| demoenv-trial-1 | 3306 | MASTER | UP    | ON        | OK            |
+08
+| demoenv-trial-2 | 3306 | SLAVE  | UP    | ON        | OK            |
+09
+| demoenv-trial-3 | 3306 | SLAVE  | UP    | ON        | OK            |
+10
++-----------------+------+--------+-------+-----------+---------------+
+11
+ 
+12
+Q-quit R-refresh H-health G-GTID Lists U-UUIDs
+它又可以工作了。
+
+12. 对于 auto-failover 的简短总结：
+它包含在mysql-utilities这个软件包中；
+它只能工作在MySQL 5.6 版本上，因为需要GITDs的支持；
+它可以自动选取一个slave作为新的master，当现有的master死掉以后；
+但是它不能自动将旧的master恢复，并且在手动恢复了旧的master之后也会停止工作。
