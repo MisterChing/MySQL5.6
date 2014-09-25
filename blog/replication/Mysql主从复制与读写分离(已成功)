@@ -1,0 +1,663 @@
+一、简介
+二、Mysql主从配置
+三、读写分离配置
+一、Amoeba简介
+Amoeba(变形虫)项目,该开源框架于2008年开始发布一款 Amoeba for Mysql软件。这个软件致力于MySQL的分布式数据库前端代理层，它主要在应用层访问MySQL的 时候充当SQL路由功能，专注于分布式数据库代理层（Database Proxy）开发。座落与 Client、DB Server(s)之间,对客户端透明。具有负载均衡、高可用性、SQL 过滤、读写分离、可路由相关的到目标数据库、可并发请求多台数据库合并结果。 通过Amoeba你能够完成多数据源的高可用、负载均衡、数据切片的功能，目前Amoeba已在很多企业的生产线上面使用
+Amoeba优缺点
+优点：
+1、降低费用，简单易用
+2、提高系统整体可用性
+3、易于扩展处理能力与系统规模
+4、可以直接实现读写分离及负载均衡效果，而不用修改代码
+缺点：
+1、不支持事务与存储过程
+2、暂不支持分库分表，amoeba目前只做到分数据库实例
+3、不适合从amoeba导数据的场景或者对大数据量查询的query并不合适（比如一次请求返回10w以上甚至更多数据的场合）
+Mysql GTID
+Mysql 5.6的新特性之一，加入了全局事务性ID(GTID:Global Transactions Identifier)来强化数据库的主备一致性，故障恢复，以及容错能力;也使得复制功能的配置、监控及管理变得更加易于实现，且更加健壮
+二、Mysql主从配置
+1、环境介绍：
+两台Mysql数据库实现主从配置，172.16.14.2主机为Master；172.16.14.3为Slave
+2、在Master服务器上安装并配置Mysql
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+######安装Mysql并加入到系统服务
+[root@master ~]# tar xf mysql-5.6.13-linux-glibc2.5-x86_64.tar.gz -C /usr/local/
+[root@master ~]# cd /usr/local/
+[root@master local]# ln -s mysql-5.6.13-linux-glibc2.5-x86_64 mysql
+[root@master local]# cd mysql
+[root@master mysql]# cp support-files/mysql.server /etc/init.d/mysqld
+[root@master mysql]# chmod +x /etc/init.d/mysqld
+[root@master mysql]# chkconfig --add mysqld
+[root@master mysql]# echo "PATH=/usr/local/mysql/bin:$PATH" >> /etc/profile
+[root@master mysql]# . /etc/profile
+----------------------------------------------------------------------
+######提供主配置文件
+[root@master mysql]# vim /etc/my.cnf
+[client]
+#password       = your_password
+port            = 3306
+socket          = /tmp/mysql.sock
+[mysqld]
+port            = 3306
+socket          = /tmp/mysql.sock
+skip-external-locking
+key_buffer_size = 256M
+max_allowed_packet = 1M
+table_open_cache = 256
+sort_buffer_size = 1M
+read_buffer_size = 1M
+read_rnd_buffer_size = 4M
+myisam_sort_buffer_size = 64M
+thread_cache_size = 8
+query_cache_size= 16M
+thread_concurrency = 8
+binlog-format=ROW
+log-slave-updates=true
+gtid-mode=on
+enforce-gtid-consistency=true
+master-info-repository=TABLE
+relay-log-info-repository=TABLE
+sync-master-info=1
+slave-parallel-workers=2
+binlog-checksum=CRC32
+master-verify-checksum=1
+slave-sql-verify-checksum=1
+binlog-rows-query-log_events=1
+report-port=3306
+datadir=/data
+report-host=master.allen.com
+log-bin=mysql-bin
+server-id       = 10
+[mysqldump]
+quick
+max_allowed_packet = 16M
+[mysql]
+no-auto-rehash
+[myisamchk]
+key_buffer_size = 128M
+sort_buffer_size = 128M
+read_buffer = 2M
+write_buffer = 2M
+[mysqlhotcopy]
+interactive-timeout
+----------------------------------------------------------------------
+######初始化Mysql
+[root@master mysql]# useradd -r mysql
+[root@master mysql]# mkdir /data
+[root@master mysql]# chown -R mysql.mysql /data
+[root@master mysql]# chown -R root.mysql /usr/local/mysql/*
+[root@master mysql]# ./scripts/mysql_install_db --user=mysql --datadir=/data/
+[root@master ~]# service mysqld start
+3、在Slave服务器上安装Mysql与在Master服务器上安装方法相同，这里不在介绍，而在Slave服务器上安装Mysql有两个参数与Master服务器不同；如下
+1
+2
+3
+server-id=11
+report-host=slave.allen.com
+[root@slave ~]# service mysqld start
+4、在Master服务器上为Slave创建复制用户并测试连接
+1
+2
+3
+4
+5
+6
+[root@master ~]# mysql
+mysql> grant replication slave,replication client on *.* to 'slave'@'172.16.%.%' identified by 'passwd';
+mysql> flush privileges;
+------------------------------------------------------------------------
+######测试连接
+[root@slave ~]# mysql -uslave -ppasswd -h 172.16.14.2
+5、启动从节点的复制线程
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+[root@slave ~]# mysql
+mysql> change master to master_host='172.16.14.2',master_user='slave',master_password='passwd',master_auto_position=1;
+mysql> start slave;
+mysql> show slave status\G;
+*************************** 1. row ***************************
+               Slave_IO_State: Waiting for master to send event
+                  Master_Host: 172.16.14.2
+                  Master_User: slave
+                  Master_Port: 3306
+                Connect_Retry: 60
+              Master_Log_File: mysql-bin.000005
+          Read_Master_Log_Pos: 191
+               Relay_Log_File: slave-relay-bin.000003
+                Relay_Log_Pos: 401
+        Relay_Master_Log_File: mysql-bin.000005
+             Slave_IO_Running: Yes      #主要看这两项为“YES”说明成功
+            Slave_SQL_Running: Yes
+6、在Master服务器创建数据库查看Slave服务器是否更新
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+[root@master ~]# mysql -e 'create database allen;'
+------------------------------------------------------------------------
+[root@slave ~]# mysql -e 'show databases;'
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
+| allen              |
+| mysql              |
+| performance_schema |
+| test               |
++--------------------+
+######由上可见，新创建的"allen"数据库已成功同步
+至此Mysql 5.6 基于GTID的复制已经完成，下面将介绍如何基于Mysql的主从复制架构做读写分离
+三、读写分离配置
+1、基于前面做的Mysql主从架构，然后在前端加一台服务器，用于实现Mysql的读写分离，IP地址为：172.16.14.1；由于Amoeba是java程序所研发，所以需要先安装JDK程序
+2、安装JDK
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+[root@amoeba ~]# chmod +x jdk-6u31-linux-x64-rpm.bin
+[root@amoeba ~]# ./jdk-6u31-linux-x64-rpm.bin
+[root@amoeba ~]# vim /etc/profile.d/java.sh
+export JAVA_HOME=/usr/java/latest
+export PATH=$JAVA_HOME/bin:$PATH
+[root@amoeba ~]# . /etc/profile.d/java.sh
+[root@amoeba ~]# java -version
+java version "1.6.0_31"
+Java(TM) SE Runtime Environment (build 1.6.0_31-b04)
+Java HotSpot(TM) 64-Bit Server VM (build 20.6-b01, mixed mode)
+3、安装Amoeba
+1
+2
+3
+4
+5
+6
+7
+8
+[root@amoeba ~]# mkdir /usr/local/amoeba
+[root@amoeba ~]# tar xf amoeba-mysql-binary-2.2.0.tar.gz -C /usr/local/amoeba/
+[root@amoeba ~]# vim /etc/profile.d/amoeba.sh
+export AMOEBA_HOME=/usr/local/amoeba
+export PATH=$AMOEBA_HOME/bin:$PATH
+[root@amoeba ~]# . /etc/profile.d/amoeba.sh
+[root@amoeba ~]# amoeba
+amoeba start|stop
+4、授权Mysql用户，用于实现前端Amoeba连接，由于上面授权的主从复制帐号不能同步"mysql"数据库，所以用户名也无法同步，要在两台数据库上同时授权，用户名密码保持一致
+1
+2
+3
+4
+5
+6
+7
+[root@master ~]# mysql
+mysql> grant all on *.* to 'amoeba'@'172.16.%.%' identified by 'amoebapass';
+mysql> flush privileges;
+------------------------------------------------------------------------
+[root@slave ~]# mysql
+mysql> grant all on *.* to 'amoeba'@'172.16.%.%' identified by 'amoebapass';
+mysql> flush privileges;
+5、配置Amoeba
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+[root@amoeba ~]# cd /usr/local/amoeba/conf/  #主要配置文件为以下两个
+amoeba.xml        #定义数据库读写分离及节点管理信息等
+dbServers.xml     #定义连接后端Mysql服务器信息
+------------------------------------------------------------------------
+[root@amoeba conf]# vim dbServers.xml
+<?xml version="1.0" encoding="gbk"?>
+<!DOCTYPE amoeba:dbServers SYSTEM "dbserver.dtd">
+<amoeba:dbServers xmlns:amoeba="http://amoeba.meidusa.com/">
+        <!--
+            Each dbServer needs to be configured into a Pool,
+            If you need to configure multiple dbServer with load balancing that can be simplified by the following configuration:
+             add attribute with name virtual = "true" in dbServer, but the configuration does not allow the element with name factoryConfig
+             such as 'multiPool' dbServer
+        -->
+    <dbServer name="abstractServer" abstractive="true">
+        <factoryConfig class="com.meidusa.amoeba.mysql.net.MysqlServerConnectionFactory">
+            <property name="manager">${defaultManager}</property>
+            <property name="sendBufferSize">64</property>
+            <property name="receiveBufferSize">128</property>
+            <!-- mysql port -->
+            <property name="port">3306</property>
+            #连接后端Mysql服务器端口
+            <!-- mysql schema -->
+            <property name="schema">test</property>
+            #连接到后端Mysql使用的默认数据库
+            <!-- mysql user -->
+            <property name="user">amoeba</property>
+            #连接后端Mysql数据库的用户名
+            <property name="password">amoebapass</property>
+                #连接后端Mysql数据库的用户名
+        </factoryConfig>
+        <poolConfig class="com.meidusa.amoeba.net.poolable.PoolableObjectPool">
+            <property name="maxActive">500</property>
+            <property name="maxIdle">500</property>
+            <property name="minIdle">10</property>
+            <property name="minEvictableIdleTimeMillis">600000</property>
+            <property name="timeBetweenEvictionRunsMillis">600000</property>
+            <property name="testOnBorrow">true</property>
+            <property name="testOnReturn">true</property>
+            <property name="testWhileIdle">true</property>
+        </poolConfig>
+    </dbServer>
+                        #定义"master"数据库节点,"name"名称可以自定义
+    <dbServer name="master"  parent="abstractServer">
+        <factoryConfig>
+            <!-- mysql ip -->
+            <property name="ipAddress">172.16.14.2</property>
+        </factoryConfig>
+    </dbServer>
+                       #定义"slave"数据库节点
+    <dbServer name="slave"  parent="abstractServer">
+        <factoryConfig>
+            <!-- mysql ip -->
+            <property name="ipAddress">172.16.14.3</property>
+        </factoryConfig>
+    </dbServer>
+                                                                                                                                                                                                                              
+    <dbServer name="multiPool" virtual="true">
+        <poolConfig class="com.meidusa.amoeba.server.MultipleServerPool">
+            <!-- Load balancing strategy: 1=ROUNDROBIN , 2=WEIGHTBASED , 3=HA--> #这里注释的为算法
+            <property name="loadbalance">1</property>
+            #定义选择哪一种算法进行负载均衡调度
+            <!-- Separated by commas,such as: server1,server2,server1 -->
+#定义数据库池,用于实现负载均衡."slave"为上面定义的从数据库节点，可以写多个用","分隔;
+如:"slave,slave,master"可以实现基于权重负载的效果;当然这里也可以不用定义
+            <property name="poolNames">slave</property>
+        </poolConfig>
+    </dbServer>
+</amoeba:dbServers>
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+101
+102
+========================================================================
+[root@amoeba conf]# vim amoeba.xml
+<?xml version="1.0" encoding="gbk"?>
+<!DOCTYPE amoeba:configuration SYSTEM "amoeba.dtd">
+<amoeba:configuration xmlns:amoeba="http://amoeba.meidusa.com/">
+    <proxy>
+        <!-- service class must implements com.meidusa.amoeba.service.Service -->
+<service name="Amoeba for Mysql" class="com.meidusa.amoeba.net.ServerableConnectionManager">
+            <!-- port --> #定义amoeba代理服务器的对外连接监听端口
+            <property name="port">3306</property>   
+            <!-- bind ipAddress --> #定义amoeba代理服务器对外连接的监听IP
+            <property name="ipAddress">172.16.14.1</property>   
+            <property name="manager">${clientConnectioneManager}</property> 
+            <property name="connectionFactory">
+                <bean class="com.meidusa.amoeba.mysql.net.MysqlClientConnectionFactory">
+                    <property name="sendBufferSize">128</property>
+                    <property name="receiveBufferSize">64</property>
+                </bean>
+            </property>   
+            <property name="authenticator">
+                <bean class="com.meidusa.amoeba.mysql.server.MysqlClientAuthenticator">              
+    #定义amoeba连接用户名和密码，客户端或程序只需要使用此用户名和密码连接即可
+                    <property name="user">admin</property>          
+                    <property name="password">password</property>           
+                    <property name="filter">
+                        <bean class="com.meidusa.amoeba.server.IPAccessController">
+                    <property name="ipFile">${amoeba.home}/conf/access_list.conf</property>
+                        </bean>
+                    </property>
+                </bean>
+            </property>   
+        </service>
+        <!-- server class must implements com.meidusa.amoeba.service.Service -->
+        <service name="Amoeba Monitor Server" class="com.meidusa.amoeba.monitor.MonitorServer">
+            <!-- port -->
+            <!--  default value: random number
+            <property name="port">9066</property>
+            -->
+            <!-- bind ipAddress -->
+            <property name="ipAddress">127.0.0.1</property>
+            <property name="daemon">true</property>
+            <property name="manager">${clientConnectioneManager}</property>
+            <property name="connectionFactory">
+            <bean class="com.meidusa.amoeba.monitor.net.MonitorClientConnectionFactory"></bean>
+            </property>   
+        </service>
+        <runtime class="com.meidusa.amoeba.mysql.context.MysqlRuntimeContext">
+            <!-- proxy server net IO Read thread size -->
+            <property name="readThreadPoolSize">20</property>   
+            <!-- proxy server client process thread size -->
+            <property name="clientSideThreadPoolSize">30</property> 
+            <!-- mysql server data packet process thread size -->
+            <property name="serverSideThreadPoolSize">30</property> 
+            <!-- per connection cache prepared statement size  -->
+            <property name="statementCacheSize">500</property>  
+            <!-- query timeout( default: 60 second , TimeUnit:second) -->
+            <property name="queryTimeout">60</property>
+        </runtime>
+    </proxy>
+    <!--
+        Each ConnectionManager will start as thread
+        manager responsible for the Connection IO read , Death Detection
+    -->
+    <connectionManagerList>
+    <connectionManager name="clientConnectioneManager" class="com.meidusa.amoeba.net.MultiConnectionManagerWrapper">
+    <property name="subManagerClassName">com.meidusa.amoeba.net.ConnectionManager</property>
+            <!--
+              default value is avaliable Processors
+            <property name="processors">5</property>
+             -->
+        </connectionManager>
+<connectionManager name="defaultManager" class="com.meidusa.amoeba.net.MultiConnectionManagerWrapper">
+<property name="subManagerClassName">com.meidusa.amoeba.net.AuthingableConnectionManager</property> 
+            <!--
+              default value is avaliable Processors
+            <property name="processors">5</property>
+             -->
+        </connectionManager>
+    </connectionManagerList>
+                                                                                                                                                                   
+        <!-- default using file loader -->
+    <dbServerLoader class="com.meidusa.amoeba.context.DBServerConfigFileLoader">
+        <property name="configFile">${amoeba.home}/conf/dbServers.xml</property>
+    </dbServerLoader>
+    <queryRouter class="com.meidusa.amoeba.mysql.parser.MysqlQueryRouter">
+        <property name="ruleLoader">
+            <bean class="com.meidusa.amoeba.route.TableRuleFileLoader">
+                <property name="ruleFile">${amoeba.home}/conf/rule.xml</property>
+                <property name="functionFile">${amoeba.home}/conf/ruleFunctionMap.xml</property>
+            </bean>
+        </property>
+        <property name="sqlFunctionFile">${amoeba.home}/conf/functionMap.xml</property>
+        <property name="LRUMapSize">1500</property>
+        <property name="defaultPool">master</property>
+        #定义默认池,一些sql语句默认会在此定义的服务器上执行
+        <property name="writePool">master</property>
+                #定义只写数据库
+        <property name="readPool">slave</property>
+#定义只读数据库,此处定义的是在"dbServer.xml"文件中定义的后端服务器名称，也可以定义数据库池的名称,实现负载均衡
+        <property name="needParse">true</property>
+    </queryRouter>
+</amoeba:configuration>
+6、启动amoeba服务并连接测试
+1
+2
+3
+4
+5
+[root@amoeba ~]# amoeba start &
+[root@amoeba ~]# ss -tanlp | grep 3306
+LISTEN     0      128      ::ffff:172.16.14.1:3306     :::*      users:(("java",29448,54))
+######由上可见已启动成功并监听在3306端口
+------------------------------------------------------------------------
+100603942.gif
+7、连接到amoeba代理服务器,执行插入与查询操作,分别在后端两台服务器上抓包,查看是否实现读写分离
+1
+2
+3
+4
+[root@amoeba ~]# mysql -uadmin -ppassword -h 172.16.14.1
+mysql> create table allen.table (id int(4));  #执行写入操作
+Query OK, 0 rows affected (0.08 sec)
+mysql> select User,Host from mysql.user;      #执行查询操作
+102539195.gif
+102542226.gif
+由上图可见，抓包的结果实现了读写分离的效果
+到此，Mysql基于GTID的主从复制及Mysql的读写分离已完成，后续会更新其他内容，敬请关注...
