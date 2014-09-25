@@ -1,0 +1,315 @@
+If you’re a user of MySQL Workbench then you may have noticed a pocket knife icon appear in the top right hand corner – click on that and a terminal opens which gives you access to the MySQL utilities. In this post I’m focussing on the replication utilities but you can also refer to the full MySQL Utilities documentation.
+
+What I’ll step through is how to uses these utilities to:
+
+Set up replication from a single master to multiple slaves
+Automatically detect the failure of the master and promote one of the slaves to be the new master
+Introduce the old master back into the topology as a new slave and then promote it to be the master again
+Tutorial Video
+
+Before going through the steps in detail here’s a demonstration of the replication utilities in action…
+
+
+
+To get full use of these utilities you should use the InnoDB storage engine together with the Global Transaction ID functionality from the latest MySQL 5.6 DMR.
+
+Do you really need/want auto-failover?
+
+For many people, the instinctive reaction is to deploy a fully automated system that detects when the master database fails and then fails over (promotes a slave to be the new master) without human intervention. For many applications this may be the correct approach.
+
+There are inherent risks to this though – What if the failover implementation has a flaw and fails (after all, we probably don’t test this out in the production system very often)? What if the slave isn’t able to cope with the workload and makes things worse? Is it just a transitory glitch and would the best approach have been just to wait it out?
+
+Following a recent, high profile outage there has been a great deal of debate on the topic between those that recommend auto-failover and those that believe it should only ever be entrusted to a knowledgeable (of the application and the database architecture) and well informed (of the state of the database nodes, application load etc.) human. Of course, if the triggering of the failover is to be left to a human then you want that person to have access to the information they need and an extremely simple procedure (ideally a single command) to execute the failover. Probably the truth is that it all depends on your specific circumstances.
+
+The MySQL replication utilities aim to support you whichever camp you belong to:
+
+In the fully automated mode, the utilities will continually monitor the state of the master and in the event of its failure identify the best slave to promote – by default it will select the one that is most up-to-date and then apply any changes that are available on other slaves but not on this one before promoting it to be the new master. The user can override this behaviour (for example by limiting which of the slaves are eligible for promotion). The user is also able to bind in their own programs to be run before and after the failover (for example, to inform the application).
+In the monitoring mode, the utility still continually checks the availability of the master, and informs the user if it should fail. The user then executes a single command to fail over to their preferred slave.
+Step 1. Make sure MySQL Servers are configured correctly
+
+For some of the utilities, it’s important that you’re using Global Transaction IDs; binary logging needs to be enabled; may as well use the new crash-safe slave functionality… It’s beyond the scope of this post to go through all of those and so instead I’ll just give example configuration files for the 5 MySQL Servers that will be used:
+
+my1.cnf
+
+[mysqld]
+binlog-format=ROW
+log-slave-updates=true
+gtid-mode=on
+disable-gtid-unsafe-statements=true # Use enforce-gtid-consistency from 5.6.9+
+master-info-repository=TABLE
+relay-log-info-repository=TABLE
+sync-master-info=1
+datadir=/home/billy/mysql/data1
+server-id=1
+log-bin=util11-bin.log
+report-host=utils1
+report-port=3306
+socket=/home/billy/mysql/sock1
+port=3306
+my2.cnf
+
+[mysqld]
+binlog-format=ROW
+log-slave-updates=true
+gtid-mode=on
+disable-gtid-unsafe-statements=true # Use enforce-gtid-consistency from 5.6.9+
+master-info-repository=TABLE
+relay-log-info-repository=TABLE
+sync-master-info=1
+datadir=/home/billy/mysql/data2
+server-id=2
+log-bin=util12-bin.log
+report-host=utils1
+report-port=3307
+socket=/home/billy/mysql/sock2
+port=3307
+my3.cnf
+
+[mysqld]
+binlog-format=ROW
+log-slave-updates=true
+gtid-mode=on
+disable-gtid-unsafe-statements=true # Use enforce-gtid-consistency from 5.6.9+
+master-info-repository=TABLE
+relay-log-info-repository=TABLE
+sync-master-info=1
+datadir=/home/billy/mysql/data3
+server-id=3
+log-bin=util2-bin.log
+report-host=utils2
+report-port=3306
+socket=/home/billy/mysql/sock3
+port=3306
+my4.cnf
+
+[mysqld]
+binlog-format=ROW
+log-slave-updates=true
+gtid-mode=on
+disable-gtid-unsafe-statements=true # Use enforce-gtid-consistency from 5.6.9+
+master-info-repository=TABLE
+relay-log-info-repository=TABLE
+master-info-file=/home/billy/mysql/master4.info
+datadir=/home/billy/mysql/data4
+server-id=4
+log-bin=util4-bin.log
+report-host=utils2
+report-port=3307
+socket=/home/billy/mysql/sock4
+port=3307
+my5.cnf
+
+[mysqld]
+binlog-format=ROW
+log-slave-updates=true
+gtid-mode=on
+disable-gtid-unsafe-statements=true # Use enforce-gtid-consistency from 5.6.9+
+datadir=/home/billy/mysql/data5
+master-info-repository=TABLE
+relay-log-info-repository=TABLE
+sync-master-info=1
+#master-info-file=/home/billy/mysql/master5.info
+server-id=5
+log-bin=util5-bin.log
+report-host=utils2
+report-port=3308
+socket=/home/billy/mysql/sock5
+port=3308
+The utilities are actually going to be run from a remote host and so it will be necessary for that host to access each of the MySQL Servers and so a user has to be granted remote access (note that the utilities will automatically create the replication user):
+
+[billy@utils1 ~]$ mysql -h 127.0.0.1 -P3306 -u root -e "grant all on *.* to root@'%' with grant option;"
+[billy@utils1 ~]$ mysql -h 127.0.0.1 -P3307 -u root -e "grant all on *.* to root@'%' with grant option;"
+[billy@utils2 ~]$ mysql -h 127.0.0.1 -P3306 -u root -e "grant all on *.* to root@'%' with grant option;"
+[billy@utils2 ~]$ mysql -h 127.0.0.1 -P3307 -u root -e "grant all on *.* to root@'%' with grant option;"
+[billy@utils2 ~]$ mysql -h 127.0.0.1 -P3308 -u root -e "grant all on *.* to root@'%' with grant option;"
+OK – that’s the most painful part of the whole process out of the way!
+
+Set up replication
+
+While there are extra options (such as specifying what username/password to use for the replication user or providing a password for the root user) I’m going to keep things simple and use the defaults as much as possible. The following commands are run from the MySQL Utilities terminal – just click on the pocket-knife icon in MySQL Workbench.
+
+mysqlreplicate --master=root@utils1:3306 --slave=root@utils1:3307
+# master on utils1: ... connected.
+# slave on utils1: ... connected.
+# Checking for binary logging on master...
+# Setting up replication...
+# ...done.
+
+mysqlreplicate --master=root@utils1:3306 --slave=root@utils2:3306
+# master on utils1: ... connected.
+# slave on utils2: ... connected.
+# Checking for binary logging on master...
+# Setting up replication...
+# ...done.
+
+mysqlreplicate --master=root@utils1:3306 --slave=root@utils2:3307
+# master on utils1: ... connected.
+# slave on utils2: ... connected.
+# Checking for binary logging on master...
+# Setting up replication...
+# ...done.
+
+mysqlreplicate --master=root@utils1:3306 --slave=root@utils2:3308
+# master on utils1: ... connected.
+# slave on utils2: ... connected.
+# Checking for binary logging on master...
+# Setting up replication...
+# ...done.
+That’s it, replication has now been set up from one master to four slaves.
+
+You can now check that the replication topology matches what you intended:
+
+mysqlrplshow --master=root@utils1 --discover-slaves-login=root;
+# master on utils1: ... connected.
+# Finding slaves for master: utils1:3306
+
+# Replication Topology Graph
+utils1:3306 (MASTER)
+   |
+   +--- utils1:3307 - (SLAVE)
+   |
+   +--- utils2:3306 - (SLAVE)
+   |
+   +--- utils2:3307 - (SLAVE)
+   |
+   +--- utils2:3308 - (SLAVE)
+Additionally, you can also check that any of the replication relationships is correctly configure:
+
+mysqlrplcheck --master=root@utils1 --slave=root@utils2
+# master on utils1: ... connected.
+# slave on utils2: ... connected.
+Test Description                                                     Status
+---------------------------------------------------------------------------
+Checking for binary logging on master                                [pass]
+Are there binlog exceptions?                                         [pass]
+Replication user exists?                                             [pass]
+Checking server_id values                                            [pass]
+Is slave connected to master?                                        [pass]
+Check master information file                                        [pass]
+Checking InnoDB compatibility                                        [pass]
+Checking storage engines compatibility                               [pass]
+Checking lower_case_table_names settings                             [pass]
+Checking slave delay (seconds behind master)                         [pass]
+# ...done.
+Including the -s option would have included the output that you’d expect to see from SHOW SLAVE STATUSG on the slave.
+
+Automated monitoring and failover
+
+The previous section showed how you can save some serious time (and opportunity for user-error) when setting up MySQL replication. We now look at using the utilities to automatically monitor the state of the master and then automatically promote a new master from the pool of slaves. For simplicity I’ll stick with default values wherever possible but note that there are a number of extra options available to you such as:
+
+Constraining which slaves are eligible for promotion to master; the default is to take the most up-to-date slave
+Binding in your own scripts to be run before or after the failover (e.g. inform your application to switch master?)
+Have the utility monitor the state of the servers but don’t automatically initiate failover
+Here is how to set it up:
+
+mysqlfailover --master=root@utils1:3306 --discover-slaves-login=root --rediscover
+
+MySQL Replication Failover Utility
+Failover Mode = auto     Next Interval = Wed Aug 15 13:19:30 2012
+
+Master Information
+------------------
+Binary Log File    Position  Binlog_Do_DB  Binlog_Ignore_DB
+util11-bin.000001  2586
+
+Replication Health Status
++---------+-------+---------+--------+------------+---------+
+| host    | port  | role    | state  | gtid_mode  | health  |
++---------+-------+---------+--------+------------+---------+
+| utils1  | 3306  | MASTER  | UP     | ON         | OK      |
+| utils1  | 3307  | SLAVE   | UP     | ON         | OK      |
+| utils2  | 3306  | SLAVE   | UP     | ON         | OK      |
+| utils2  | 3307  | SLAVE   | UP     | ON         | OK      |
+| utils2  | 3308  | SLAVE   | UP     | ON         | OK      |
++---------+-------+---------+--------+------------+---------+
+
+Q-quit R-refresh H-health G-GTID Lists U-UUIDs
+mysqlfailover will then continue to run, refreshing the state – just waiting for something to go wrong.
+
+Rather than waiting, I kill the master MySQL Server:
+
+mysqladmin -h utils1 -P3306 -u root shutdown
+Checking with the still-running mysqlfailover we can see that it has promoted utils1:3307.
+
+MySQL Replication Failover Utility
+Failover Mode = auto     Next Interval = Wed Aug 15 13:21:13 2012
+
+Master Information
+------------------
+Binary Log File    Position  Binlog_Do_DB  Binlog_Ignore_DB
+util12-bin.000001  7131
+
+Replication Health Status
++---------+-------+---------+--------+------------+---------+
+| host    | port  | role    | state  | gtid_mode  | health  |
++---------+-------+---------+--------+------------+---------+
+| utils1  | 3307  | MASTER  | UP     | ON         | OK      |
+| utils2  | 3306  | SLAVE   | UP     | ON         | OK      |
+| utils2  | 3307  | SLAVE   | UP     | ON         | OK      |
+| utils2  | 3308  | SLAVE   | UP     | ON         | OK      |
++---------+-------+---------+--------+------------+---------+
+
+Q-quit R-refresh H-health G-GTID Lists U-UUIDs
+Add the recovered MySQL Server back into the topology
+
+After restarting the failed MySQL Server, it can be added back into the mix as a slave to the new master:
+
+mysqlreplicate --master=root@utils1:3307 --slave=root@utils1:3306
+# master on utils1: ... connected.
+# slave on utils1: ... connected.
+# Checking for binary logging on master...
+# Setting up replication...
+# ...done.
+The output from mysqlfailover (still running) confirms the addition:
+
+MySQL Replication Failover Utility
+Failover Mode = auto     Next Interval = Wed Aug 15 13:24:38 2012
+
+Master Information
+------------------
+Binary Log File    Position  Binlog_Do_DB  Binlog_Ignore_DB
+util12-bin.000001  7131
+
+Replication Health Status
++---------+-------+---------+--------+------------+---------+
+| host    | port  | role    | state  | gtid_mode  | health  |
++---------+-------+---------+--------+------------+---------+
+| utils1  | 3307  | MASTER  | UP     | ON         | OK      |
+| utils1  | 3306  | SLAVE   | UP     | ON         | OK      |
+| utils2  | 3306  | SLAVE   | UP     | ON         | OK      |
+| utils2  | 3307  | SLAVE   | UP     | ON         | OK      |
+| utils2  | 3308  | SLAVE   | UP     | ON         | OK      |
++---------+-------+---------+--------+------------+---------+
+
+Q-quit R-refresh H-health G-GTID Lists U-UUIDs
+If it were important that the recovered MySQL Server be restored as the master then it is simple to manually trigger the promotion (after quitting out of mysqlfailover):
+
+mysqlrpladmin --master=root@utils1:3307 --new-master=root@utils1:3306 --demote-master 
+  --discover-slaves-login=root switchover
+
+# Discovering slaves for master at utils1:3307
+# Checking privileges.
+# Performing switchover from master at utils1:3307 to slave at utils1:3306.
+# Checking candidate slave prerequisites.
+# Waiting for slaves to catch up to old master.
+# Stopping slaves.
+# Performing STOP on all slaves.
+# Demoting old master to be a slave to the new master.
+# Switching slaves to new master.
+# Starting all slaves.
+# Performing START on all slaves.
+# Checking slaves for errors.
+# Switchover complete.
+#
+# Replication Topology Health:
++---------+-------+---------+--------+------------+---------+
+| host    | port  | role    | state  | gtid_mode  | health  |
++---------+-------+---------+--------+------------+---------+
+| utils1  | 3306  | MASTER  | UP     | ON         | OK      |
+| utils1  | 3307  | SLAVE   | UP     | ON         | OK      |
+| utils2  | 3306  | SLAVE   | UP     | ON         | OK      |
+| utils2  | 3307  | SLAVE   | UP     | ON         | OK      |
+| utils2  | 3308  | SLAVE   | UP     | ON         | OK      |
++---------+-------+---------+--------+------------+---------+
+# ...done.
+As always, we’d really appreciate people trying this out and giving us feedback!
