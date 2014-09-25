@@ -1,0 +1,44 @@
+这是一起生产环境的故障解决记录，出错的数据库属于Zabbix监控系统，而整个操作过程由公司的专职DBA完成并记录。
+
+1. 故障表现：Mysqld 进程持续重启，大量的错误日志：
+120906 7:29:43 InnoDB: Page checksum 4195361555, prior-to-4.0.14-form checksum 2124157186
+InnoDB: stored checksum 3323954773, prior-to-4.0.14-form stored checksum 2124157186
+InnoDB: Page lsn 54 139070759, low 4 bytes of lsn at page end 139070759
+InnoDB: Page number (if stored to page already) 134634,
+InnoDB: space id (if created with >= MySQL-4.1.1 and stored already) 0
+InnoDB: Page may be an index page where index id is 0 89
+InnoDB: (index "history_1" of table "zabbix"."history")
+InnoDB: Database page corruption on disk or a failed
+InnoDB: file read of page 134634.
+InnoDB: You may have to recover from a backup.
+InnoDB: It is also possible that your operating
+InnoDB: system has corrupted its own file cache
+InnoDB: and rebooting your computer removes the
+InnoDB: error.
+InnoDB: If the corrupt page is an index page
+InnoDB: you can also try to fix the corruption
+InnoDB: by dumping, dropping, and reimporting
+InnoDB: the corrupt table. You can use CHECK
+InnoDB: TABLE to scan your table for corruption.
+InnoDB: See also http://dev.mysql.com/doc/refman/5.1/en/forcing-innodb-recovery.html
+InnoDB: about forcing recovery.
+InnoDB: Ending processing because of a corrupt database page.
+
+2. 故障原因，这类情况一般有2种情况：
+mysql 服务异常关闭和硬件磁盘损坏。Innodb 自检过程中checksum与退出时不一致便会去recover；
+或者退出时buffer中flush到磁盘的任务未正常结束并update checksum。
+
+3. 解决办法。首先确定出错的数据表。(index "history_1" of table "zabbix"."history")。按下面的顺序尝试。
+A. 进入mysql，如果mysql持续报错，但mysqld线程稳定，使用check table，optmize table 进行修复，大部分情况是失败。无响应或者ERROR 2013 (HY000): Lost connection to MySQL server during query
+B. mysqld 进程不断重启（由innodb引擎发起的重启），check 和optimize 几乎无法在一个重启周期内完成。在my.cnf文件增加innodb_force_recovery=1 保证进程稳定。
+
+4. 数据的恢复。
+Check table 和 Optmize 其实对innodb效果不明显，所以80%解决不了问题，数据恢复有2种情况：
+A.表数据完整，但checksum不一致
+a) 新建同结构表，engine=myisam
+b) Insert into new select * from old
+c) Alter table new type=innodb
+d) Drop table old,rename table new to old
+B.表数据丢失，这种一般是磁盘损坏，方法和上面一样，区别在于，需要去需找破坏点，找到损坏的数据页面范围，达到最小数据损失。在有主键id的情况下相对容易且损失数据更小。
+
+5. 恢复后在配置文件中注释 innodb_force_recovery=1 ，并重启。
