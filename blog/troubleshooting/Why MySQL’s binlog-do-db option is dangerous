@@ -1,0 +1,16 @@
+I see a lot of people filtering replication with binlog-do-db, binlog-ignore-db, replicate-do-db, and replicate-ignore-db. Although there are uses for these, they are dangerous and in my opinion, they are overused. For many cases, there’s a safer alternative.
+The danger is simple: they don’t work the way you think they do. Consider the following scenario: you set binlog-ignore-db to “garbage” so data in the garbage database (which doesn’t exist on the slave) isn’t replicated. (I’ll come back to this in a second, so if you already see the problem, don’t rush to the comment form.)
+Now you do the following:
+
+Shell
+$ mysql
+mysql> delete from garbage.junk;
+mysql> use garbage;
+mysql> update production.users set disabled = 1 where user = "root";
+
+You just broke replication, twice. Once, because your slave is going to execute the first query and there’s no such table “garbage.junk” on the slave. The second time, silently, because the update to production.users isn’t replicated, so now the root user isn’t disabled on the slave.
+Why? Because binlog-ignore-db doesn’t do what you think. The phrase I used earlier, “data in the garbage database isn’t replicated,” is a fallacy. That’s not what it does. In fact, it filters out binary logging for statements issued from connections whose default database is “garbage.” In other words, filtering is not based on the contents of the query — it is based on what database you USE.
+The other configuration options I mentioned work similarly. The binlog-do-db and binlog-ignore-db statements are particularly dangerous because they keep statements from ever being written to the binary log, which means you can’t use the binary log for point-in-time recovery of your data from a backup.
+In a carefully controlled environment, these options can have benefits, but I won’t talk about that here. (We covered that in our book.)
+The safer alternative is to configure filters on the slave, with options that actually operate on the tables mentioned in the query itself. These are replicate-wild-* options. For example, the safer way to avoid replicating data in the garbage database is to configure replicate-wild-ignore-table=garbage.%. There are still edge cases where that won’t work, but it works in more cases and has fewer gotchas.
+If you are confused, you should read the replication rules section of the manual until you know it by heart :-)
