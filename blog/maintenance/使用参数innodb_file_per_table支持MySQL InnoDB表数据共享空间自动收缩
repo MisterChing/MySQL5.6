@@ -1,0 +1,221 @@
+参考资料：
+http://linuxfun.me/?p=1263
+
+使用过MySQL的同学，刚开始接触最多的莫过于MyISAM表引擎了，这种引擎的数据库会分别创建三个文件：表结构、表索引、表数据空间。我们可以将某个数据库目录直接迁移到其他数据库也可以正常工作。
+然而当你使用InnoDB的时候，一切都变了。InnoDB 默认会将所有的数据库InnoDB引擎的表数据存储在一个共享空间中：ibdata1，这样就感觉不爽，增删数据库的时候，ibdata1文件不会自动收缩，单个数据库的备份也将成为问题。通常只能将数据使用mysqldump 导出，然后再导入解决这个问题。
+在MySQL的配置文件[mysqld]部分，增加innodb_file_per_table参数，可以修改InnoDB为独立表空间模式，每个数据库的每个表都会生成一个数据空间。
+
+独立表空间
+优点：
+1.每个表都有自已独立的表空间。
+2.每个表的数据和索引都会存在自已的表空间中。
+3.可以实现单表在不同的数据库中移动。
+4.空间可以回收（drop/truncate table方式操作表空间不能自动回收）
+5.对于使用独立表空间的表，不管怎么删除，表空间的碎片不会太严重的影响性能，而且还有机会处理。
+
+缺点：
+单表增加比共享空间方式更大。
+
+结论：
+共享表空间在Insert操作上有一些优势，但在其它都没独立表空间表现好。
+当启用独立表空间时，请合理调整一下 innodb_open_files 参数。
+
+下面，就是一次针对线上Zabbix的MySQL数据库history历史记录过多导致ibdata1文件过大的实战解决步骤
+1.查看文件大小
+$ sudo cd /var/lib/mysql
+$ ls -lh
+
+1
+total 14G
+2
+-rw-r--r-- 1 root root 0 Dec 1 14:31 debian-5.1.flag
+3
+-rw-rw---- 1 mysql mysql 5.0M Jan 17 21:31 ib_logfile0
+4
+-rw-rw---- 1 mysql mysql 5.0M Jan 17 21:29 ib_logfile1
+5
+-rw-rw---- 1 mysql mysql 14G Jan 17 21:31 ibdata1
+6
+drwx------ 2 mysql root 4.0K Dec 1 14:31 mysql
+7
+-rw-rw---- 1 root root 6 Dec 1 14:31 mysql_upgrade_info
+8
+drwx------ 2 mysql mysql 4.0K Jan 17 21:29 zabbix
+共享表数据空间文件ibdata1大小已经达到了14G
+
+登陆MySQL查看哪些表占用了空间
+$ mysql -uroot -p
+
+01
+mysql > select table_name, (data_length+index_length)/1024/1024 as total_mb, table_rows from information_schema.tables where table_schema='zabbix';
+02
+ 
+03
++-----------------------+---------------+------------+
+04
+| table_name            | total_mb      | table_rows |
+05
++-----------------------+---------------+------------+
+06
+| acknowledges          |    0.06250000 |          0 |
+07
+....
+08
+| help_items            |    0.04687500 |        103 |
+09
+| history               | 9678.00000000 |  123981681 |
+10
+| history_log           |    0.04687500 |          0 |
+11
+...
+12
+| history_text          |    0.04687500 |          0 |
+13
+| history_uint          | 5386.98437500 |   57990562 |
+14
+| history_uint_sync     |    0.04687500 |          0 |
+15
+...
+16
+| timeperiods           |    0.01562500 |          0 |
+17
+| trends                |   54.54687500 |     537680 |
+18
+| trends_uint           |  100.53125000 |    1035592 |
+19
+...
+20
+103 rows in set (1.46 sec)
+可以看到，history表的记录已经达到了9G，123981681条，即1亿2千万条，同时history_unit也比较大，达到了5G，约6千万条；
+另外就是trends,trends_uint中也存在一些数据。
+由于数据量太大，按照普通的方式delete数据的话基本上不太可能。
+因为我们每天会自动发送数据报表，所以决定直接采用truncate table的方式来快速清空这些表的数据，再使用mysqldump导出数据，删除共享表空间数据文件，重新导入数据。
+
+2.停止相关服务，避免写入数据
+$ sudo /etc/init.d/zabbix-server stop
+$ sudo /etc/init.d/apache2 stop
+
+3.清空历史数据
+$ mysql -uroot -p
+
+01
+mysql > use zabbix;
+02
+Database changed
+03
+ 
+04
+mysql > truncate table history;
+05
+Query OK, 123981681 rows affected (0.23 sec)
+06
+ 
+07
+mysql > optimize table history;
+08
+1 row in set (0.02 sec)
+09
+ 
+10
+mysql > truncate table history_uint;
+11
+Query OK, 57990562 rows affected (0.12 sec)
+12
+ 
+13
+mysql > optimize table history_uint;
+14
+1 row in set (0.03 sec)
+15
+ 
+16
+mysql > truncate table trends;
+17
+Query OK, 537680 rows affected (0.04 sec)
+18
+ 
+19
+mysql > optimize table trends;
+20
+1 row in set (0.02 sec)
+21
+ 
+22
+mysql > truncate table trends_uint;
+23
+Query OK, 1035592 rows affected (0.02 sec)  
+24
+ 
+25
+mysql > optimize table trends_uint;
+26
+1 row in set (0.01 sec)          
+4.备份数据
+$ mysqldump -uroot -p zabbix > ~/zabbix.sql
+
+5.停止数据库
+$ sudo stop mysql
+
+6.删除共享表空间数据文件
+$ cd /var/lib/mysql
+$ rm ib*
+
+7.增加innodb_file_per_table参数
+$ sudo vim /etc/mysql/my.cnf
+在[mysqld]下设置
+
+1
+innodb_file_per_table=1
+8.启动MySQL
+$ sudo start mysql
+
+9.查看参数是否生效
+$ mysql -uroot -p
+
+1
+mysql> show variables like '%per_table%';
+2
++-----------------------+-------+
+3
+| Variable_name | Value |
+4
++-----------------------+-------+
+5
+| innodb_file_per_table | ON |
+6
++-----------------------+-------+
+7
+1 row in set (0.00 sec)
+10.重新导入数据
+$ mysql -uroot -p zabbix < ~/zabbix.sql
+
+11.编写每天自动清理数据的脚本，保留30天的数据
+$ sudo vim /etc/cron.daily/clean_zabbix_olddata.sh
+
+01
+#!/bin/bash
+02
+DATE=`date -d "30 days ago"`
+03
+CLOCK=`date +%s -d "${DATE}"`
+04
+MYSQL="mysql -uroot -p zabbix"
+05
+ 
+06
+for TABLE in history trends
+07
+do
+08
+  $MYSQL -e "DELETE FROM ${TABLE} WHERE clock < ${CLOCK};"
+09
+  $MYSQL -e "OPTIMIZE TABLE ${TABLE};"
+10
+  $MYSQL -e "DELETE FROM ${TABLE}_uint WHERE clock < ${CLOCK};"
+11
+  $MYSQL -e "OPTIMIZE TABLE ${TABLE}_uint;"
+12
+done
+12.最后，恢复相关服务进程
+$ sudo /etc/init.d/zabbix-server start
+$ sudo /etc/init.d/apache2 start
