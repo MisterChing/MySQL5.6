@@ -1,0 +1,135 @@
+1.安装cmake
+MySQL从5.5版本开始，通过./configure进行编译配置方式已经被取消，取而代之的是cmake工具。
+因此，我们首先要在系统中源码编译安装cmake工具。
+
+# wget http://www.cmake.org/files/v2.8/cmake-2.8.4.tar.gz
+
+# tar zxvf cmake-2.8.4.tar.gz
+
+# cd cmake-2.8.4
+
+# ./configure
+# make
+# make install
+
+2.确保以下所需系统软件包已经被安装
+通过 rpm -qa | grep name 的方式验证以下软件包是否已全部安装。
+gcc* gcc-c++* autoconf* automake* zlib* libxml* ncurses-devel* libgcrypt* libtool*
+
+如果缺少相关的软件包，可通过yum -y install 的方式在线安装，或直接从系统安装光盘中找到并通过rpm -ivh 的方式安装。
+
+3. 安装前的系统设置
+建立mysql安装目录及数据存放目录
+# mkdir /opt/mysql
+# mkdir /opt/mysql/data
+
+创建用户和用户组
+# groupadd mysql
+# useradd -g mysql mysql
+
+赋予数据存放目录权限
+# chown mysql:mysql -R /opt/mysql/data
+
+4.从configure更换为cmake
+我相信大多数人都已经习惯了之前的configure方式，并且所使用的参数也是比较个性化的，换成cmake之后，这一方面会带来不少的麻烦。
+还好，MySQL的官方网站提供了二者的参数对照表，我们可以尽可能的保留之前的参数，来编译配置新的MySQL版本。
+
+configure 与 cmake 参数对照指南：
+http://forge.mysql.com/wiki/Autotools_to_CMake_Transition_Guide
+
+以我自己为例，之前我一直使用的参数为：
+./configure --prefix=/opt/mysql/ \
+--sysconfdir=/opt/mysql/etc \
+--localstatedir=/opt/mysql/data \
+--with-tcp-port=3306 \
+--with-unix-socket-path=/tmp/mysqld.sock \
+--with-mysqld-user=mysql \
+--enable-assembler \
+--with-extra-charsets=all \
+--enable-thread-safe-client \
+--with-big-tables \
+--with-readline \
+--with-ssl \
+--with-embedded-server \
+--enable-local-infile \
+--with-plugins=partition,innobase,myisammrg
+
+经过与cmake的参数对照之后，去除掉已经被取消的参数（大多数是因为新版本已经默认启用），cmake的参数配置如下：
+cmake -DCMAKE_INSTALL_PREFIX=/opt/mysql \
+-DSYSCONFDIR=/opt/mysql/etc \
+-DMYSQL_DATADIR=/opt/mysql/data \
+-DMYSQL_TCP_PORT=3306 \
+-DMYSQL_UNIX_ADDR=/tmp/mysqld.sock \
+-DMYSQL_USER=mysql \
+-DEXTRA_CHARSETS=all \
+-DWITH_READLINE=1 \
+-DWITH_SSL=system \
+-DWITH_EMBEDDED_SERVER=1 \
+-DENABLED_LOCAL_INFILE=1 \
+-DWITH_INNOBASE_STORAGE_ENGINE=1
+
+5.编译安装 MySQL 5.5.x
+通过http://www.mysql.com/downloads/mysql官方网址或国内的sohu镜像下载软件包，如目前最新的MySQL 5.5.13。
+# wget http://mirrors.sohu.com/mysql/MySQL-5.5/mysql-5.5.13.tar.gz
+
+# tar zxvf mysql-5.5.13.tar.gz
+
+# cd mysql-5.5.13
+# cmake -DCMAKE_INSTALL_PREFIX=/opt/mysql \
+-DSYSCONFDIR=/opt/mysql/etc \
+-DMYSQL_DATADIR=/opt/mysql/data \
+-DMYSQL_TCP_PORT=3306 \
+-DMYSQL_UNIX_ADDR=/tmp/mysqld.sock \
+-DMYSQL_USER=mysql \
+-DEXTRA_CHARSETS=all \
+-DWITH_READLINE=1 \
+-DWITH_SSL=system \
+-DWITH_EMBEDDED_SERVER=1 \
+-DENABLED_LOCAL_INFILE=1 \
+-DWITH_INNOBASE_STORAGE_ENGINE=1
+
+# make
+# make install
+
+在make与make install的时候可以看到进度百分比，感觉这一点要比configure方式要好。
+
+6.配置并初始化数据库
+创建my.cnf配置文件
+# mkdir /opt/mysql/log
+
+# mkdir /opt/mysql/etc
+# cp support-files/my-medium.cnf /opt/mysql/etc/my.cnf
+
+初始化数据库
+执行前需赋给scripts/mysql_install_db文件执行权限
+# chmod 755 scripts/mysql_install_db
+# scripts/mysql_install_db --user=mysql --basedir=/opt/mysql/ --datadir=/opt/mysql/data/
+
+创建管理MySQL数据库的shell脚本
+# mkdir /opt/mysql/init.d
+# cp support-files/mysql.server /opt/mysql/init.d/mysql
+
+赋予shell脚本可执行权限：
+# chmod +x /opt/mysql/init.d/mysql
+
+启动MySQL：
+# /opt/mysql/init.d/mysql start
+
+通过命令行登录管理MySQL服务器（提示输入密码时直接回车）：
+# /opt/mysql/bin/mysql -u root -p -S /tmp/mysql.sock
+
+输入以下SQL语句，创建一个具有root权限的用户（admin）和密码（12345678）：
+GRANT ALL PRIVILEGES ON *.* TO 'admin'@'localhost' IDENTIFIED BY '12345678';
+GRANT ALL PRIVILEGES ON *.* TO 'admin'@'127.0.0.1' IDENTIFIED BY '12345678';
+
+为root帐户设置初始密码
+# /opt/mysql/bin/mysqladmin -u root password 'new-password'
+
+删除本机匿名连接的空密码帐号
+/opt/mysql/bin/mysql -uroot -p'new-password'
+mysql>use mysql; //选择系统数据库mysql
+mysql>select Host,User,Password from user; //查看所有用户
+mysql>delete from user where password="";
+mysql>flush privileges;
+mysql>select Host,User,Password from user; //确认密码为空的用户是否已全部删除
+mysql>exit;
