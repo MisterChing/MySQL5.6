@@ -1,0 +1,585 @@
+背景/需求：
+在一台服务器上通过源码编译安装一个版本为5.5以上的MySQL数据库；
+将所有配置文件与数据等均存放在/opt/mysql，便于今后实现快速迁移、整体备份和快速复制；
+在同一个MySQL中运行两个实例，一个绑定在端口3306，另一个绑定在端口3307；
+绑定在3306端口的实例，不开启binlog，数据存放在/opt/mysql/data；
+绑定在3307端口的实例，开启binlog，数据存放在/opt/mysql/data2；
+两个实例均采用InnoDB作为默认的存储引擎，字符编码采用UTF-8；
+两个实例均采用相同的性能优化配置参数；
+
+实践/方案：
+在编译安装时，将数据库的配置文件my.cnf以及data目录等均指向到/opt/mysql目录；
+通过mysqld_multi的方式来管理两个不同的实例，采用相同的配置文件共享性能优化配置参数；
+在同一个配置文件中，利用[mysqld1]与[mysqld2]标签实现不同实例的差异化配置；
+
+配置步骤：
+一、编译安装MySQL
+1.安装cmake
+MySQL从5.5版本开始，通过./configure进行编译配置方式已经被取消，取而代之的是cmake工具。
+因此，我们首先要在系统中源码编译安装cmake工具。
+# wget http://www.cmake.org/files/v2.8/cmake-2.8.4.tar.gz
+
+# tar zxvf cmake-2.8.4.tar.gz
+
+# cd cmake-2.8.4
+
+# ./configure
+# make
+# make install
+
+2.确保以下所需系统软件包已经被安装
+通过 rpm -qa | grep name 的方式验证以下软件包是否已全部安装。
+
+gcc* gcc-c++* autoconf* automake* zlib* libxml* ncurses-devel* libgcrypt* libtool*
+
+如果缺少相关的软件包，可通过yum -y install 的方式在线安装，或直接从系统安装光盘中找到并通过rpm -ivh 的方式安装。
+
+3. 安装前的系统设置
+建立mysql安装目录及数据存放目录
+# mkdir /opt/mysql
+# mkdir /opt/mysql/data
+
+创建用户和用户组
+# groupadd mysql
+# useradd -g mysql mysql
+
+赋予数据存放目录权限
+# chown mysql:mysql -R /opt/mysql/data
+
+4.开始编译安装 MySQL
+通过http://www.mysql.com/downloads/mysql官方网址或国内的sohu镜像下载软件包，如目前最新的MySQL 5.5.20。
+# wget http://mirrors.sohu.com/mysql/MySQL-5.5/mysql-5.5.20.tar.gz
+
+# tar zxvf mysql-5.5.20.tar.gz
+
+# cd mysql-5.5.20
+# cmake -DCMAKE_INSTALL_PREFIX=/opt/mysql \
+-DSYSCONFDIR=/opt/mysql/etc \
+-DMYSQL_DATADIR=/opt/mysql/data \
+-DMYSQL_TCP_PORT=3306 \
+-DMYSQL_UNIX_ADDR=/tmp/mysqld.sock \
+-DMYSQL_USER=mysql \
+-DEXTRA_CHARSETS=all \
+-DWITH_READLINE=1 \
+-DWITH_SSL=system \
+-DWITH_EMBEDDED_SERVER=1 \
+-DENABLED_LOCAL_INFILE=1 \
+-DWITH_INNOBASE_STORAGE_ENGINE=1
+
+# make
+# make install
+
+在make与make install的时候可以看到进度百分比，感觉这一点要比configure方式要好。
+
+二、创建支持多实例的配置文件
+进入MySQL主目录
+# cd /opt/mysql/
+
+删除默认的data目录
+# rm -rf data
+
+创建需要的目录
+# mkdir etc tmp run log binlogs data data2
+# chown -R mysql:mysql tmp run log binlogs data data2
+
+创建my.cnf配置文件
+# vim etc/my.cnf
+
+001
+## This server may run 2+ separate instances
+002
+## So we use mysqld_multi to manage their services
+003
+[mysqld_multi]
+004
+mysqld = /opt/mysql/bin/mysqld_safe
+005
+mysqladmin = /opt/mysql/bin/mysqladmin
+006
+log = /opt/mysql/log/mysqld_multi.log
+007
+user = root ## Used for stopping the server via mysqladmin
+008
+#password =
+009
+ 
+010
+## This is the general purpose database
+011
+## The locations are default
+012
+# They are left in [mysqld] in case the server is started normally instead of by mysqld_multi
+013
+[mysqld1]
+014
+socket = /opt/mysql/run/mysqld.sock
+015
+port = 3306
+016
+pid-file = /opt/mysql/run/mysqld.pid
+017
+datadir = /opt/mysql/data
+018
+lc-messages-dir = /opt/mysql/share/english
+019
+ 
+020
+## These support master - master replication
+021
+#auto-increment-increment = 4
+022
+#auto-increment-offset = 1  ## Since it is master 1
+023
+#log-bin = /opt/mysql/binlogs/bin-log-mysqld1
+024
+#log-bin-index = /opt/mysql/binlogs/bin-log-mysqld1.index
+025
+#binlog-do-db = ## Leave this blank if you want to control it on slave
+026
+ 
+027
+## This is exlusively for mysqld2
+028
+## It is on 3307 with data directory /opt/mysqld/data2
+029
+[mysqld2]
+030
+socket = /opt/mysql/run/mysqld.sock2
+031
+port = 3307
+032
+pid-file = /opt/mysql/run/mysqld.pid2
+033
+datadir = /opt/mysql/data2
+034
+lc-messages-dir = /opt/mysql/share/english
+035
+ 
+036
+## Disable DNS lookups
+037
+#skip-name-resolve
+038
+ 
+039
+## These support master - slave replication
+040
+log-bin = /opt/mysql/binlogs/bin-log-mysqld2
+041
+log-bin-index = /opt/mysql/binlogs/bin-log-mysqld2.index
+042
+#binlog-do-db =  ## Leave this blank if you want to control it on slave
+043
+ 
+044
+## Relay log settings
+045
+#relay-log = /opt/mysql/log/relay-log-mysqld2
+046
+#relay-log-index = /opt/mysql/log/relay-log-mysqld2.index
+047
+#relay-log-space-limit = 4G
+048
+ 
+049
+## Slow query log settings
+050
+#log-slow-queries = /opt/mysql/log/slow-log-mysqld2
+051
+#long_query_time = 2
+052
+#log-queries-not-using-indexes
+053
+ 
+054
+## The rest of the my.cnf is shared
+055
+## Here follows entries for some specific programs
+056
+## The MySQL server
+057
+[mysqld]
+058
+basedir = /opt/mysql
+059
+tmpdir = /opt/mysql/tmp
+060
+socket = /opt/mysql/run/mysqld.sock
+061
+port = 3306
+062
+pid-file = /opt/mysql/run/mysqld.pid
+063
+datadir = /opt/mysql/data
+064
+lc-messages-dir = /opt/mysql/share/english
+065
+ 
+066
+skip-external-locking
+067
+key_buffer_size = 16K
+068
+max_allowed_packet = 64M
+069
+table_open_cache = 4
+070
+sort_buffer_size = 64K
+071
+read_buffer_size = 256K
+072
+read_rnd_buffer_size = 256K
+073
+net_buffer_length = 2K
+074
+thread_stack = 128K
+075
+ 
+076
+## Increase the max connections
+077
+max_connections = 1024
+078
+ 
+079
+## Increase the max connect errors
+080
+max_connect_errors = 10000
+081
+ 
+082
+## Increase the connect timeout
+083
+connect_timeout = 10
+084
+ 
+085
+## Decrease the timeout and increase the retrieves of replication
+086
+slave-net-timeout = 60
+087
+master-connect-retry = 10
+088
+ 
+089
+## The expiration time for logs, including binlogs
+090
+expire_logs_days = 14
+091
+ 
+092
+## Set the character as utf8
+093
+character-set-server = utf8
+094
+collation-server = utf8_unicode_ci
+095
+ 
+096
+## This is usually only needed when setting up chained replication
+097
+#log-slave-updates
+098
+ 
+099
+## Enable this to make replication more resilient against server crashes and restarts
+100
+## but can cause higher I/O on the server
+101
+#sync_binlog = 1
+102
+ 
+103
+## The server id, should be unique in same network
+104
+server-id = 1
+105
+ 
+106
+## Set this to force MySQL to use a particular engine/table-type for new tables
+107
+## This setting can still be overridden by specifying the engine explicitly
+108
+## in the CREATE TABLE statement
+109
+default-storage-engine = INNODB
+110
+ 
+111
+## Enable Per Table Data for InnoDB to shrink ibdata1
+112
+innodb_file_per_table = 1
+113
+ 
+114
+## Set the max size of each binlog file
+115
+max_binlog_size = 1024M
+116
+ 
+117
+## Set the binlog format
+118
+binlog_format = ROW
+119
+ 
+120
+## Uncomment the following if you are using InnoDB tables
+121
+#innodb_data_home_dir = /opt/mysql/data
+122
+#innodb_data_file_path = ibdata1:10M:autoextend
+123
+#innodb_log_group_home_dir = /opt/mysql/data
+124
+## You can set .._buffer_pool_size up to 50 - 80 % of RAM
+125
+## but beware of setting memory usage too high
+126
+innodb_buffer_pool_size = 16M
+127
+innodb_additional_mem_pool_size = 2M
+128
+## Set .._log_file_size to 25 % of buffer pool size
+129
+innodb_log_file_size = 5M
+130
+innodb_log_buffer_size = 8M
+131
+innodb_flush_log_at_trx_commit = 1
+132
+innodb_lock_wait_timeout = 50
+133
+ 
+134
+[mysqldump]
+135
+quick
+136
+max_allowed_packet = 64M
+137
+ 
+138
+[mysql]
+139
+no-auto-rehash
+140
+ 
+141
+[myisamchk]
+142
+key_buffer_size = 8M
+143
+sort_buffer_size = 8M
+144
+ 
+145
+[mysqlhotcopy]
+146
+interactive-timeout
+147
+ 
+148
+[mysql.server]
+149
+user = mysql
+150
+ 
+151
+[mysqld_safe]
+152
+log-error = /opt/mysql/log/mysqld.log
+153
+pid-file = /opt/mysql/run/mysqld.pid
+154
+open-files-limit = 8192
+155
+ 
+156
+[client]
+157
+default-character-set = utf8
+
+修改my.cnf读写权限，避免普通用户获取到MySQL密码
+# chown -R root:root /opt/mysql/etc
+# chmod 600 /opt/mysql/etc/my.cnf
+
+三、初始化数据库
+切换到mysql用户
+# su - mysql
+
+进入MySQL主目录
+# cd /opt/mysql/
+
+初始化实例[mysqld1]
+# scripts/mysql_install_db --basedir=/opt/mysql --user=mysql --datadir=/opt/mysql/data/
+
+初始化实例[mysqld2]
+# scripts/mysql_install_db --basedir=/opt/mysql --user=mysql --datadir=/opt/mysql/data2/
+
+返回到root
+# exit
+
+创建mysqld_multi.server脚本
+# cp support-files/mysqld_multi.server /opt/mysql/init.d/
+
+# vim /opt/mysql/init.d/mysqld_multi.server
+
+01
+#!/bin/sh
+02
+#
+03
+# A simple startup script for mysqld_multi by Tim Smith and Jani Tolonen.
+04
+# This script assumes that my.cnf file exists either in /etc/my.cnf or
+05
+# /root/.my.cnf and has groups [mysqld_multi] and [mysqldN]. See the
+06
+# mysqld_multi documentation for detailed instructions.
+07
+#
+08
+# This script can be used as /etc/init.d/mysql.server
+09
+#
+10
+# Comments to support chkconfig on RedHat Linux
+11
+# chkconfig: 2345 64 36
+12
+# description: A very fast and reliable SQL database engine.
+13
+#
+14
+# Version 1.0
+15
+#
+16
+basedir=/opt/mysql
+17
+bindir=/opt/mysql/bin
+18
+ 
+19
+conf=/opt/mysql/etc/my.cnf
+20
+export PATH=$PATH:$bindir
+21
+ 
+22
+if test -x $bindir/mysqld_multi
+23
+then
+24
+  mysqld_multi="$bindir/mysqld_multi";
+25
+else
+26
+  echo "Can't execute $bindir/mysqld_multi from dir $basedir";
+27
+  exit;
+28
+fi
+29
+ 
+30
+case "$1" in
+31
+    'start' )
+32
+        "$mysqld_multi" --defaults-extra-file=$conf start $2
+33
+        ;;
+34
+    'stop' )
+35
+        "$mysqld_multi" --defaults-extra-file=$conf stop $2
+36
+        ;;
+37
+    'report' )
+38
+        "$mysqld_multi" --defaults-extra-file=$conf report $2
+39
+        ;;
+40
+    'restart' )
+41
+        "$mysqld_multi" --defaults-extra-file=$conf stop $2
+42
+        "$mysqld_multi" --defaults-extra-file=$conf start $2
+43
+        ;;
+44
+    *)
+45
+        echo "Usage: $0 {start|stop|report|restart}" >&2
+46
+        ;;
+47
+esac
+四、整体备份MySQL
+# cd /opt/
+# tar czvf mysql_5.5.20_full.tar.gz mysql/
+
+备份完成后，直接将mysql_5.5.20_full.tar.gz拿到其他服务器上，解压后便可以直接启用。
+
+五、管理MySQL实例
+同时 启动/关闭 实例 [mysqld1] 与 [mysqld2]：
+# /opt/mysql/init.d/mysqld_multi.server start 1,2
+
+然后，可以看到两个MySQL实例都已经成功的启动了。
+# netstat -lntp | grep mysqld
+
+1
+tcp  0  0  0.0.0.0:3306  0.0.0.0:*  LISTEN 2850/mysqld        
+2
+tcp  0  0  0.0.0.0:3307  0.0.0.0:*  LISTEN 2946/mysqld
+同时 关闭 实例 [mysqld1] 与 [mysqld2]：
+# /opt/mysql/init.d/mysqld_multi.server stop 1,2
+
+仅 启动/关闭 实例[mysqld1]：
+# /opt/mysql/init.d/mysqld_multi.server start 1
+# /opt/mysql/init.d/mysqld_multi.server stop 1
+
+六、登陆MySQL实例
+在启动了实例[mysqld1]与[mysqld2]后，通过以下方式登陆不同的实例：
+
+登陆[mysqld1]：
+# /opt/mysql/bin/mysql -uroot -h127.0.0.1 -P3306 -p
+
+登陆[mysqld2]：
+# /opt/mysql/bin/mysql -uroot -h127.0.0.1 -P3307 -p
+
+七、其他初始化设置
+1. 为MySQL的root帐户设置初始密码
+# /opt/mysql/bin/mysqladmin -u root -h127.0.0.1 -P3306 password 'new-password'
+# /opt/mysql/bin/mysqladmin -u root -h127.0.0.1 -P3307 password 'new-password'
+
+2. 修改my.cnf配置文件中MySQL的root账户密码
+# vim /opt/mysql/etc/my.cnf
+
+1
+user = root ## Used for stopping the server via mysqladmin
+2
+password = new-password
+3. 删除匿名连接的空密码帐号
+分别登陆实例[mysqld1]与[mysqld2]，执行以下命令：
+mysql>use mysql; //选择系统数据库mysql
+mysql>select Host,User,Password from user; //查看所有用户
+mysql>delete from user where password="";
+mysql>flush privileges; //刷新权限
+mysql>select Host,User,Password from user; //确认密码为空的用户是否已全部删除
+mysql>exit;
+
+八、经验总结
+1.采用源码编译安装MySQL，可能在第一次会花费较多的时间，但却是非常值得的，因为我们可以自己组织所有MySQL相关文件的位置；并且经过源码编译安装后的MySQL，可以直接复制到其它服务器上运行，大大方便了我们今后的迁移、备份和新服务器的配置；
+
+2.本文中仅仅用了两个实例[mysqld1]与[mysqld2]来举例，实际上我们可以通过这样的方式，实现[mysqld3],[mysqld4],[mysqld5]...等更多的实例；
+
+3.MySQL自带了几个不同的配置文件，放置在/opt/mysql/support-files目录下，分别是my-huge.cnf,my-innodb-heavy-4G.cnf,my-large.cnf,my-medium.cnf,my-small.cnf，通过名称我们可以很直观的了解到他们是针对不同的服务器配置的，本文中仅有的一点关于InnoDB的配置，是取自于my-small.cnf的，因为我是在虚拟机上进行的设置；在生产环境中，我们可以通过参考my-huge.cnf或my-innodb-heavy-4G.cnf中的部分参数配置，来对服务器进行优化；
+
+4.关于MySQL缓存参数的优化，主要用于提升I/O能力，可以参考这里：http://heylinux.com/archives/1389.html
+
+5.在单机运行多实例的情况下，切忌使用 mysql -hlocalhost 或 直接忽略-h参数 登陆服务器，这应该算是MySQL的一个bug，就是如果使用localhost或忽略-h参数，而不是指定127.0.0.1的话，即使选择的端口是3307，还是会登陆到3306中去，因此应尽量避免这种混乱的产生，统一用127.0.0.1绑定端口 或 采用socket 来登陆；
