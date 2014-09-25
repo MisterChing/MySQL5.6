@@ -1,0 +1,23 @@
+今天，所有MySQL从服务器上的主从复制都被异常中断了，登陆到其中一台上执行show slave status\G，发现如下错误：
+--
+Last_Error: Error 'Operation DROP USER failed for 'guest'@'localhost'' on query. Default database: 'work'. Query: 'drop user 'guest'@'localhost''
+--
+也就是说，是 drop user 'guest'@'localhost' 这条命令导致的，而这样的操作我们通常都只会在Master上进行，并且该操作应该只会影响到“mysql”这个系统数据库。之前这种操作进行了很多次，可为什么唯独这一次会出问题呢？
+经过一番调查之后，最终找到了问题的根源，那就是，
+“binlog-do-db, binlog-ignore-db, replicate-do-db, replicate-ignore-db” 这一类参数，并非想象中可靠！
+
+通常，我们会以为只要设定了以上参数，MySQL的主从复制就会只对我们设定的数据库生效。但事实上，MySQL不是根据内容来判断的，而是很傻瓜的根据你执行了“use work”或在初始连接时指定的数据库来判断的。
+而这次，我们在执行drop user之前，因为需要从“work”数据库select一些数据，就use work进入到了work数据库，而大家都知道在执行drop user的时候是不需要进入“mysql”这个系统数据库的，所以就直接执行了drop user，但因为MySQL的判断我们是在use work之后执行的，所以认为是针对“work”数据库的操作就同步了下去，而从服务上都是没有guest@localhost这样的用户的，所以就造成了错误，导致主从复制的中断。
+
+因此，在有主从复制架构的MySQL服务器环境中，我们要尽量避免这样的跨库操作，确保是在执行了正确的use dbname之后再执行命令。
+
+这类故障的恢复方案很简单，就是跳过这一条SQL。
+--
+stop slave;
+set global sql_slave_skip_counter=1;
+start slave;
+show slave status\G
+--
+
+参考资料：
+http://www.mysqlperformanceblog.com/2009/05/14/why-mysqls-binlog-do-db-option-is-dangerous/
