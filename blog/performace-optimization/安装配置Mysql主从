@@ -1,0 +1,152 @@
+环境：
+主从服务器上的MySQL数据库版本同为5.1.34
+主机IP：192.168.0.1
+从机IP：192.168.0.2
+一. MySQL主服务器配置
+1.编辑配置文件/etc/my.cnf
+# 确保有如下行
+server-id = 1
+log-bin=mysql-bin
+binlog-do-db=mysql  #需要备份的数据库名，如果备份多个数据库，重复设置这个选项即可
+binlog-ignore-db=mysql  #不需要备份的数据库名，如果备份多个数据库，重复设置这个选项即可
+log-slave-updates #这个参数一定要加上，否则不会给更新的记录些到二进制文件里
+slave-skip-errors #是跳过错误，继续执行复制操作
+2.建立用户
+mysql> grant replication slave on *.* to slave@192.168.0.2 identified by ‘111111′;
+# grant replication slave on *.* to ‘用户名’@'主机’ identified by ‘密码’;
+# 可在Slave上做连接测试: mysql -h 192.168.0.1 -u test -p
+3.锁主库表
+mysql> FLUSH TABLES WITH READ LOCK;
+4.显示主库信息
+记录File和Position，从库设置将会用到
+=====================
+mysql> SHOW MASTER STATUS;
++------------------+----------+--------------+------------------+
+| File             | Position | Binlog_do_db | Binlog_ignore_db |
++------------------+----------+--------------+------------------+
+| mysql-bin.000001 | 106      |              |                  |
++------------------+----------+--------------+------------------+
+5.另开一个终端，打包主库
+cd /usr/local/mysql  #mysql库目录
+tar zcvf var.tar.gz var
+============================
+二.MySQL从服务器配置
+1、传输拿到主库数据包、解包
+# cd /usr/local/mysql
+# scp 192.168.0.1:/usr/local/mysql/var.tar.gz .
+# tar zxvf var.tar.gz
+2、查看修改var文件夹权限
+# chown -R mysql:mysql var
+3.编辑 /etc/my.cnf
+server-id=2
+log-bin=mysql-bin
+master-host=192.168.0.1
+master-user=slave
+master-password=111111
+master-port=3306
+replicate-do-db=test  #需要备份的数据库名
+replicate-ignore-db=mysql #忽略的数据库
+master-connect-retry=60 #如果从服务器发现主服务器断掉，重新连接的时间差(秒)
+log-slave-updates #这个参数一定要加上，否则不会给更新的记录些到二进制文件里
+slave-skip-errors #是跳过错误，继续执行复制操作
+4、验证连接MASTER
+# mysql -h192.168.0.1 -uslave -ppassword
+mysql> show grants for slave@192.168.0.2;
+5、在SLAVE上设置同步
+设置连接MASTER MASTER_LOG_FILE为主库的File，MASTER_LOG_POS为主库的Position
+============================
+mysql> slave stop;
+mysql> CHANGE MASTER TO MASTER_HOST='192.168.0.1',MASTER_USER='slave',MASTER_PASSWORD='111111',MASTER_LOG_FILE='mysql-bin.000001',MASTER_LOG_POS=106;
+6、启动SLAVE服务
+mysql> slave start;
+7、查看SLAVE状态
+mysql> SHOW SLAVE STATUS\G;
+其中 Slave_IO_Running 和 Slave_SQL_Running 两列的值都为 "Yes"，表明 Slave 的 I/O 和 SQL 线程都在正常运行。
+8、解锁主库表
+mysql> UNLOCK TABLES;
+到此主从库搭建成功。可以在主库上插入数据测试同步是否正常。
+常见错误及解决方法：
+常见问题的处理：
+
+1：在从库上面show slave status\G;出现下列情况，
+          Slave_IO_Running: Yes
+          Slave_SQL_Running: No
+          Seconds_Behind_Master: NULL
+
+原因：
+a.程序可能在slave上进行了写操作
+b.也可能是slave机器重起后，事务回滚造成的.
+ 
+解决方法：
+
+进入master
+
+mysql> show master status;
++----------------------+----------+--------------+------------------+
+| File | Position | Binlog_Do_DB | Binlog_Ignore_DB |
++----------------------+----------+--------------+------------------+
+| mysql-bin.000040 | 324 | | |
++----------------------+----------+--------------+------------------+
+然后到slave服务器上执行手动同步
+
+slave stop;
+change master to 
+master_host='10.14.0.140',
+master_user='repl',
+master_password='111111',
+master_port=3306,
+master_log_file='mysql-bin.000040',
+master_log_pos=324;
+slave start;
+show slave status\G;
+
+2、现象：从数据库无法同步，show slave status显示Slave_IO_Running为No,Seconds_Behind_Master为null
+
+       解决：重启主数据库
+
+             service mysql restart
+
+             mysql> show master status;
++------------------+----------+--------------+------------------+
+| File | Position | Binlog_Do_DB | Binlog_Ignore_DB |
++------------------+----------+--------------+------------------+
+| mysql-bin.000001 | 98 | | |
++------------------+----------+--------------+------------------+
+slave stop;
+change master to Master_Log_File='mysql-bin.000001',Master_Log_Pos=98
+slave start;
+或是这样：
+stop slave;
+set global sql_slave_skip_counter =1;
+start slave;
+ 
+这个现象主要是master数据库存在问题，我在实际的操作中先重启master后重启slave即可解决这问题，出现此问题，必须要要重启master数据库。
+1.主辅库同步主要是通过二进制日志来实现同步的。
+2.在启动辅库的时候必须先把数据同步，并删除日志目录下的：master.info文件。因为master.info记录了上次要连接主库的信息，如果不删除，即使my.cnf里进行了修改，也不起作用。因为读取的还是master.info文件里的信息。
+ 
+在mysql复制环境中,有8个参数可以让我们控制,需要复制或需要忽略不进行复制的DB或table分别为: 
+下面二项需要在Master上设置： 
+Binlog_Do_DB:设定哪些数据库需要记录Binlog 
+Binlog_Ignore_DB:设定哪里数据库不需要记录Binlog 
+  
+优点是Master端的Binlog记录所带来的Io量减少，网络IO减少，还会让slave端的IO线程,SQL线程减少，从而大幅提高复制性能, 
+缺点是mysql判断是否需要复制某个事件不是根据产生该事件的查询所在的DB,而是根据执行查询时刻所在的默认数据库（也就是登录时指定的库名或运行"use database"中指定的DB）,只有当前默认DB和配置中所设定的DB完全吻合时IO线程才会将该事件读取给slave的IO线程.所以,如果在默认DB和设定须要复制的DB不一样的情况下改变了须要复制的DB中某个Table中的数据,该事件是不会被复制到Slave中去的,这样就会造成Slave端的数据和Master的数据不一致.同样,在默认的数据库下更改了不须要复制的数据库中的数据,则会被复制到slave端,当slave端并没有该数据库时,则会造成复制出错而停止. 
+  
+下面六项需要在slave上设置： 
+Replicate_Do_DB:设定需要复制的数据库,多个DB用逗号分隔 
+Replicate_Ignore_DB:设定可以忽略的数据库. 
+Replicate_Do_Table:设定需要复制的Table 
+Replicate_Ignore_Table:设定可以忽略的Table 
+Replicate_Wild_Do_Table:功能同Replicate_Do_Table,但可以带通配符来进行设置。 
+Replicate_Wild_Ignore_Table:功能同Replicate_Do_Table,功能同Replicate_Ignore_Table,可以带通配符。 
+  
+优点是在slave端设置复制过滤机制,可以保证不会出现因为默认的数据库问题而造成Slave和Master数据不一致或复制出错的问题. 
+缺点是性能方面比在Master端差一些.原因在于:不管是否须要复制,事件都会被IO线程读取到Slave端,这样不仅增加了网络IO量,也给Slave端的IO线程增加了Relay Log的写入量.
+同步原理说明
+MySQL的Replication基于主服务器在二进制日志中跟踪所有对数据库的更改(更新、删除等)。
+MySQL使用3个线程来完成Replication工作，具体分布是主上1个相关线程、从上2个相关线程；
+主的相关线程可以理解为主服务器上SHOW PROCESSLIST的输出中的Binlog Dump线程、从服务器分别为IO和SQL线程;
+主服务器创建将binlog中的内容发送到从服务器。从服务器I/O线程读取主服务器Binlog Dump线程发送的内容并将该数据拷贝到从服务器数据目录中的中继日志文件（relay-log）里，SQL线程用于读取中继日志并执行日志中包含的更新。
+MySQL的Replication是单向，异步同步
+MySQL同步机制基于master把所有对数据库的更新、删除等)都记录在二进制日志里。因此，想要启用同步机制，在master就必须启用二进制日志。每个slave接受来自master上在二进制日志中记录的更新操作，因此在slave上执行了这个操作的一个拷贝。应该非常重要地意识到，二进制日志只是从启用二进制日志开始的时刻才记录更新操作的。所有的 slave必须在启用二进制日志时把master上已经存在的数据拷贝过来。如果运行同步时slave上的数据和master上启用二进制日志时的数据不一致的话，那么slave同步就会失败。把master上的数据拷贝过来的方法之一实在slave上执行 LOAD DATA FROM MASTER 语句。不过要注意，LOAD DATA FROM MASTER 是从MySQL 4.0.0之后才开始可以用的，而且只支持master上的 MyISAM 类型表。同样地，这个操作需要一个全局的读锁，这样的话传送日志到slave的时候在master上就不会有更新操作了。当实现了自由锁表热备份时(在 MySQL 5.0中)，全局读锁就没必要了。由于有这些限制，因此我们建议只在master上相关数据比较小的时候才执行 LOAD DATA FROM MASTER 语句，或者在master上允许一个长时间的读锁。由于每个系统之间 LOAD DATA FROM MASTER 的速度各不一样，一个比较好的衡量规则是每秒能拷贝1MB数据。这只是的粗略的估计，不过master和slave都是奔腾700MHz的机器且用 100MBit/s网络连接时就能达到这个速度了。slave上已经完整拷贝master数据后，就可以连接到master上然后等待处理更新了。如果 master当机或者slave连接断开，slave会定期尝试连接到master上直到能重连并且等待更新。重试的时间间隔由 –master-connect-retry 选项来控制，它的默认值是60秒。每个slave都记录了它关闭时的日志位置。master是不知道有多少个slave连接上来或者哪个slave从什么时候开始更新。
+MySQL同步功能由3个线程(master上1个，slave上2个)来实现。执行 START SLAVE 语句后，slave就创建一个I/O线程。I/O线程连接到master上，并请求master发送二进制日志中的语句。master创建一个线程来把日志的内容发送到slave上。这个线程在master上执行 SHOW PROCESSLIST 语句后的结果中的 Binlog Dump 线程便是。slave上的I/O线程读取master的 Binlog Dump 线程发送的语句，并且把它们拷贝到其数据目录下的中继日志(relay logs)中。第三个是SQL线程，salve用它来读取中继日志，然后执行它们来更新数据。如上所述，每个mster/slave上都有3个线程。每个 master上有多个线程，它为每个slave连接都创建一个线程，每个slave只有I/O和SQL线程。在MySQL 4.0.2以前，同步只需2个线程(master和slave各一个)。slave上的I/O和SQL线程合并成一个了，它不使用中继日志。slave上使用2个线程的优点是，把读日志和执行分开成2个独立的任务。执行任务如果慢的话，读日志任务不会跟着慢下来。例如，如果slave停止了一段时间，那么 I/O线程可以在slave启动后很快地从master上读取全部日志，尽管SQL线程可能落后I/O线程好几的小时。如果slave在SQL线程没全部执行完就停止了，但I/O线程却已经把所有的更新日志都读取并且保存在本地的中继日志（relay-log）中了，因此在slave再次启动后就会继续执行它们了。这就允许在 master上清除二进制日志，因为slave已经无需去master读取更新日志了。执行 SHOW PROCESSLIST 语句就会告诉我们所关心的master和slave上发生的情况。
