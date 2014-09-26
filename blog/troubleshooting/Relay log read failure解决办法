@@ -1,0 +1,26 @@
+show slave status \G  提示如下错误
+Relay log read failure: Could not parse relay log event entry. The possible reasons are: 
+the master's binary log is corrupted (you can check this by running 'mysqlbinlog' on the binary log), 
+the slave's relay log is corrupted (you can check this by running 'mysqlbinlog' on the relay log), 
+a network problem, or a bug in the master's or slave's MySQL code. If you want to check the master's 
+binary log or slave's relay log, you will be able to know their names by issuing 'SHOW SLAVE STATUS' on this slave.
+原因 
+在传输master log-bin时，因网络原因或slave机压力问题，造成log-relay文件格式错误
+
+解决方法一： 
+找到relay-log.info，第一行记录了当前正在执行的log-relay文件名 
+找到该文件的下一个文件 
+使用mysqlbinlog查看该文件，在#98这行有Rotate to log-bin.000004 pos: 4等信息，这就是目前slave停止的位置
+在slave上重新指定同步位置，重新执行：
+change master to 
+master_host='1.1.1.1',
+master_user='repl',
+master_password='111111',
+master_port=3306,
+master_log_file='log-bin.000004',
+master_log_pos=4;
+slave start;
+show slave status\G;
+解决方法二：
+stop slave之后，重新reset slave;
+再看，数据已经开始同步了
