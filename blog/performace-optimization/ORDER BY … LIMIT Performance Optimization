@@ -1,0 +1,72 @@
+Suboptimal ORDER BY implementation, especially together with LIMIT is often the cause of MySQL Performance problems.
+Here is what you need to know about ORDER BY … LIMIT optimization to avoid these problems
+ORDER BY with LIMIT is most common use of ORDER BY in interactive applications with large data sets being sorted. On many web sites you will fine top tags, recently registered users etc – which would often require ORDER BY with LIMIT in the back end. In general this type of ORDER BY looks like: SELECT ….. WHERE [conditions] ORDER BY [sort] LIMIT N,M
+Make sure it uses index It is very important to have ORDER BY with LIMIT executed without scanning and sorting full result set, so it is important for it to use index – in this case index range scan will be started and query execution stopped as soon as soon as required amount of rows generated.
+For example if I do SELECT * FROM sites ORDER BY date_created DESC LIMIT 10; I would use index on (date_created) to get result set very fast.
+Now what if I have something like SELECT * FROM sites WHERE category_id=5 ORDER BY date_created DESC LIMIT 10;
+In this case index by date_created may also work but it might not be the most efficient – If it is rare category large portion of table may be scanned to find 10 rows. So index on (category_id, date_created) will be better idea.
+Lets take a look at a bit more complex case: SELECT * FROM sites WHERE category_id in (5,10,12) ORDER BY date_created DESC LIMIT 10;
+Even though it looks quite similar to previous one it is a lot different as there are multiple category_id values in the list now so index on (category_id, date_created) can’t be used directly. Index on date_created separately would still work. The good from performance standpoint (even though a bit ugly) will be UNION workaround I already wrote about.
+So what if you have application which can perform search on many different columns, with worse then perfect selectivity. Various social networking and dating sites are perfect example of such queries
+SELECT FROM people where gender=’m’ and age between 18 and 28 and country_id=5 and city_id=345 order by last_online desc limit 10;
+There could be many possible limiting factors with all of them being optional. This is hard nut to crack and I know on high end custom search solutions can be developed, but if we stick to simple MySQL using multiple indexes on most selective columns would be good idea for performance of such queries.
+For example you may put index on(gender,last_online) assuming most people will have gender specified, as well as (country_id,city_id,last_online) assuming in most cases these will be specified. It takes a good look at queries actually being run and data selectivity to come up with good set of indexes for such case, it also may need to be adjusted in the future.
+The main thing to watch for, if you do not have full where clause resolved by index is how many rows you need to scan to resolve order by (this can be found in slow query log or by examining Hander statistics). If only 50 rows are examined to provide
+10 rows of result set you’re in decent shape but if it is 5000 you might need to rethink your indexing.
+Also note – number of records scanned to provide result set will be very dynamic based on particular constant and other factors.
+For example for our dating example if we use only (last_online) index and look for people from USA we likely will find 10 people pretty quickly, if the country is small or simply there are few members from the country, ie Slovenia – same kind of search might need to scan 1000s times more rows to provide result set.
+In the example above we did order by by last column, in fact index can be used for ORDER BY if sorting is done by leading column(s). Note however columns following column used for order by can’t be used to restrict result set. For example:
+key(a,b,c) SELECT * FROM tbl WHERE c=5 ORDER BY a,b limit 10 – In this case first two columns from the index can be used to satisfy order by, index however will not be helpful to check c=5 (unless it is index covered query). Index on
+(c,a,b) would work better for query above.
+Do not sort by expressions I guess this one is obvious – expressions or functions will block index usage for order by.
+Sort by column in leading table if you have JOIN with ORDER BY … LIMIT you should try hard to have sorting column(s) to be in the leading table. If ORDER BY is going by field from the table which is not first in the join order index can’t be used. Sometimes it means breaking normalization and duplicating column(s) you’re going to use in ORDER BY in other table.
+Here is example when ORDER BY is done by second table which requires filesort:
+Shell
+mysql> explain select test.i from test, test t where test.k=5 and test.i=t.k order by t.k limit 5;
++----+-------------+-------+------+---------------+------+---------+-------------+------+---------------------------------+
+| id | select_type | table | type | possible_keys | key  | key_len | ref         | rows | Extra                           |
++----+-------------+-------+------+---------------+------+---------+-------------+------+---------------------------------+
+|  1 | SIMPLE      | test  | ref  | PRIMARY,k     | k    | 4       | const       |    1 | Using temporary; Using filesort |
+|  1 | SIMPLE      | t     | ref  | k             | k    | 4       | test.test.i |    1 | Using where; Using index        |
++----+-------------+-------+------+---------------+------+---------+-------------+------+---------------------------------+
+2 rows in set (0.00 sec)
+However if first table has “const” or “system” access type it is effectively removed from join execution (replaced with constants) and so ORDER BY can be optimized even if it is done by second table:
+Shell
+mysql> explain select test.i from test, test t where test.i=5 and test.k=t.k order by t.k limit 5;
++----+-------------+-------+-------+---------------+---------+---------+-------+------+-------------+
+| id | select_type | table | type  | possible_keys | key     | key_len | ref   | rows | Extra       |
++----+-------------+-------+-------+---------------+---------+---------+-------+------+-------------+
+|  1 | SIMPLE      | test  | const | PRIMARY,k     | PRIMARY | 4       | const |    1 |             |
+|  1 | SIMPLE      | t     | ref   | k             | k       | 4       | const |    1 | Using index |
++----+-------------+-------+-------+---------------+---------+---------+-------+------+-------------+
+2 rows in set (0.01 sec)
+The difference between these cases is “i” is primary key while “k” is simply indexes column.
+Note: In some cases even if it is possible to use index to do ORDER BY with JOIN MySQL still will not be able to use it as Optimizer is not smart enough yet to detect such cases:
+Shell
+mysql> explain select test.i from test, test t where test.k=5 and test.i=t.k order by test.k,t.j limit 5;
++----+-------------+-------+------+---------------+------+---------+-------------+------+---------------------------------+
+| id | select_type | table | type | possible_keys | key  | key_len | ref         | rows | Extra                           |
++----+-------------+-------+------+---------------+------+---------+-------------+------+---------------------------------+
+|  1 | SIMPLE      | test  | ref  | PRIMARY,k     | k    | 4       | const       |    1 | Using temporary; Using filesort |
+|  1 | SIMPLE      | t     | ref  | k             | k    | 4       | test.test.i |    1 | Using where; Using index        |
++----+-------------+-------+------+---------------+------+---------+-------------+------+---------------------------------+
+2 rows in set (0.00 sec)
+In this case there is index (k,j) on the table so indexes could be used on each of the tables to optimize order by, or at least local sort could be used for each t.k=const value for the second table. Which is not done however.
+Sort in one direction. If you have ORDER BY col1, col2 it can be optimized using index, if you have
+ORDER BY col1 DESC, col2 DESC same thing, however if you would have ORDER BY col1, col2 DESC MySQL will have to use filesort. Classic for solution for this would be to have index which is sorted appropriately (ascending by col1 and descending by col2) but MySQL can’t do it at this point. Workaround which can be currently used is separate column which holds reverse values, so you can do ORDER BY col1, col2_reverse instead.
+Beware of large LIMIT Using index to sort is efficient if you need first few rows, even if some extra filtering takes place so you need to scan more rows by index then requested by LIMIT. However if you’re dealing with LIMIT query with large offset efficiency will suffer. LIMIT 1000,10 is likely to be way slower than LIMIT 0,10. It is true most users will not go further than 10 page in results, however Search Engine Bots may very well do so. I’ve seen bots looking at 200+ page in my projects. Also for many web sites failing to take care of this provides very easy task to launch a DOS attack – request page with some large number from few connections and it is enough. If you do not do anything else make sure you block requests with too large page numbers.
+For some cases, for example if results are static it may make sense to precompute results so you can query them for positions.
+So instead of query with LIMIT 1000,10 you will have WHERE position between 1000 and 1009 which has same efficiency for any position (as long as it is indexed)
+Force index if needed In some cases MySQL Optimizer may prefer to use different index, which has better selectivity or just better estimates instead of which allows you to do the sort. For example if you would have indexes on (country_id,city_id) and index on (country_id,last_online) for query SELECT * FROM people WHERE country_id=5 and city_id=6 order by last_online desc limit 10; first index will be likely selected even if it leads to filesort.
+The solution for this problem is ether extending your indexes so MySQL Optimizer does not have to chose between better sort or better lookup or use FORCE INDEX to force it to use appropriate index.
+One more note about ORDER BY … LIMIT is – it provides scary explain statements and may end up in slow query log as query which does not use indexes, even if it is quite fast:
+Shell
+mysql> explain select * from test order by k limit 5;
++----+-------------+-------+-------+---------------+------+---------+------+---------+-------+
+| id | select_type | table | type  | possible_keys | key  | key_len | ref  | rows    | Extra |
++----+-------------+-------+-------+---------------+------+---------+------+---------+-------+
+|  1 | SIMPLE      | test  | index | NULL          | k    | 772     | NULL | 1638400 |       |
++----+-------------+-------+-------+---------------+------+---------+------+---------+-------+
+1 row in set (0.03 sec)
+See – “rows” is showing us there are estimated 1.6 million of rows to be scanned, while we well know it will be just 5 in this case.
+Many of the tips I’ve mentioned here work for ORDER BY without LIMIT as well but there are some differences. I should write another article about ORDER BY without limit and large tables soon.
