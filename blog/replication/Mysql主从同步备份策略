@@ -1,0 +1,228 @@
+Mysql主从同步备份策略
+环境：
+主从服务器上的MySQL数据库版本同为5.1.34
+主机IP：192.168.0.1
+从机IP：192.168.0.2
+一. MySQL主服务器配置
+1.编辑配置文件/etc/my.cnf
+# 确保有如下行
+server-id = 1
+log-bin=mysql-bin
+binlog-do-db=mysql  #需要备份的数据库名，如果备份多个数据库，重复设置这个选项即可
+binlog-ignore-db=mysql  #不需要备份的数据库名，如果备份多个数据库，重复设置这个选项即可
+log-slave-updates #这个参数一定要加上，否则不会给更新的记录些到二进制文件里
+slave-skip-errors #是跳过错误，继续执行复制操作
+2.建立用户
+mysql> grant replication slave on *.* to slave@192.168.0.2 identified by ‘111111′;
+# grant replication slave on *.* to ‘用户名’@'主机’ identified by ‘密码’;
+# 可在Slave上做连接测试: mysql -h 192.168.0.1 -u test -p
+3.锁主库表
+mysql> FLUSH TABLES WITH READ LOCK;
+4.显示主库信息
+记录File和Position，从库设置将会用到
+=====================
+mysql> SHOW MASTER STATUS;
++------------------+----------+--------------+------------------+
+| File             | Position | Binlog_do_db | Binlog_ignore_db |
++------------------+----------+--------------+------------------+
+| mysql-bin.000001 | 106      |              |                  |
++------------------+----------+--------------+------------------+
+5.另开一个终端，打包主库
+cd /usr/local/mysql  #mysql库目录
+tar zcvf var.tar.gz var
+============================
+二.MySQL从服务器配置
+1、传输拿到主库数据包、解包
+# cd /usr/local/mysql
+# scp 192.168.0.1:/usr/local/mysql/var.tar.gz .
+# tar zxvf var.tar.gz
+2、查看修改var文件夹权限
+# chown -R mysql:mysql var
+3.编辑 /etc/my.cnf
+server-id=2
+log-bin=mysql-bin
+master-host=192.168.0.1
+master-user=slave
+master-password=111111
+master-port=3306
+replicate-do-db=test  #需要备份的数据库名
+replicate-ignore-db=mysql #忽略的数据库
+master-connect-retry=60 #如果从服务器发现主服务器断掉，重新连接的时间差(秒)
+log-slave-updates #这个参数一定要加上，否则不会给更新的记录些到二进制文件里
+slave-skip-errors #是跳过错误，继续执行复制操作
+4、验证连接MASTER
+# mysql -h192.168.0.1 -uslave -ppassword
+mysql> show grants for slave@192.168.0.2;
+5、在SLAVE上设置同步
+设置连接MASTER MASTER_LOG_FILE为主库的File，MASTER_LOG_POS为主库的Position
+============================
+mysql> slave stop;
+mysql> CHANGE MASTER TO MASTER_HOST='192.168.0.1',MASTER_USER='slave',MASTER_PASSWORD='111111',MASTER_LOG_FILE='mysql-bin.000001',MASTER_LOG_POS=106;
+6、启动SLAVE服务
+mysql> slave start;
+7、查看SLAVE状态
+mysql> SHOW SLAVE STATUS\G;
+其中 Slave_IO_Running 和 Slave_SQL_Running 两列的值都为 "Yes"，表明 Slave 的 I/O 和 SQL 线程都在正常运行。
+8、解锁主库表
+mysql> UNLOCK TABLES;
+到此主从库搭建成功。可以在主库上插入数据测试同步是否正常。
+--------------------------
+附：一些错误信息的处理，主从服务器上的命令，及状态信息。
+在从服务器上使用show slave status\G
+Slave_IO_Running,为No,
+则说明IO_THREAD没有启动，请执行start slave io_thread
+Slave_SQL_Running为No
+则复制出错,查看Last_error字段排除错误后执行start slave sql_thread
+查看Slave_IO_State字段空 //复制没有启动
+Connecting to master//没有连接上master
+Waiting for master to send event//已经连上
+主服务器上的相关命令：
+show master status
+show slave hosts
+show logs
+show binlog events
+purge logs to 'log_name'
+purge logs before 'date'
+reset master(老版本flush master)
+set sql_log_bin=
+从服务器上的相关命令:
+slave start
+slave stop
+SLAVE STOP IO_THREAD //此线程把master段的日志写到本地
+SLAVE start IO_THREAD
+SLAVE STOP SQL_THREAD //此线程把写到本地的日志应用于数据库
+SLAVE start SQL_THREAD
+reset slave
+SET GLOBAL SQL_SLAVE_SKIP_COUNTER
+load data from master
+show slave status(SUPER,REPLICATION CLIENT)
+CHANGE MASTER TO MASTER_HOST=, MASTER_PORT=,MASTER_USER=, MASTER_PASSWORD= //动态改变master信息
+PURGE MASTER [before 'date'] 删除master端已同步过的日志
+6.3.1 Master 同步线程状态
+以下列出了master的 Binlog Dump 线程 State 字段中最常见的几种状态。如果在master上没有 Binlog Dump 线程，那么同步就没有在运行。
+也就是说，没有slave连接上来。
+Sending binlog event to slave
+事件是由二进制日志构成，一个事件通常由更新语句加上其他信息。线程读取到一个事件并正发送到slave上。
+Finished reading one binlog; switching to next binlog
+读取完了一个二进制日志，正切换到下一个。
+Has sent all binlog to slave; waiting for binlog to be updated
+已经读取完全部未完成更新日志，并且全部都发送到slave了。它处于空闲状态，正等待在master上执行新的更新操作以在二进制日志中产生新
+的事件，然后读取它们。
+Waiting to finalize termination
+当前线程停止了，这个时间很短。
+6.3.2 Slave的I/O线程状态
+以下列出了slave的I/O线程 State 字段中最常见的几种状态。从MySQL 4.1.1开始，这个状态在执行 SHOW SLAVE STATUS 语句结果的
+Slave_IO_State 字段也会出现。这意味着可以只执行 SHOW SLAVE STATUS 语句就能了解到更多的信息。
+Connecting to master
+该线程证尝试连接到master上。
+Checking master version
+确定连接到master后出现的一个短暂的状态。
+Registering slave on master
+确定连接到master后出现的一个短暂的状态。
+Requesting binlog dump
+确定连接到master后出现的一个短暂的状态。该线程向master发送一个请求，告诉它要请求的二进制文件以及开始位置。
+Waiting to reconnect after a failed binlog dump request
+如果二进制日志转储(binary log dump)请求失败了(由于连接断开)，该线程在休眠时进入这个状态，并定期重连。重连的时间间隔由 --
+master-connect-retry 选项来指定。
+Reconnecting after a failed binlog dump request
+该线程正尝试重连到master。
+Waiting for master to send event
+已经连接到master，正等待它发送二进制日志。如果master闲置时，这个状态可能会持续较长时间，如果它等待超过 slave_read_timeout 秒
+，就会发生超时。这时，它就会考虑断开连接，然后尝试重连。
+Queueing master event to the relay log
+已经读取到一个事件，正把它拷贝到中继日志中以备SQL线程处理。
+Waiting to reconnect after a failed master event read
+读日志时发生错误(由于连接断开)。该线程在重连之前休眠 master-connect-retry 秒。
+Reconnecting after a failed master event read
+正尝试重连到master。当连接确定后，状态就变成 Waiting for master to send event。
+Waiting for the slave SQL thread to free enough relay log space
+relay_log_space_limit 的值非零，中继日志的大小总和超过这个值了。I/O线程等待SQL线程先处理中继日志然后删除它们以释放足够的空间
+。
+Waiting for slave mutex on exit
+当前线程停止了，这个时间很短。
+6.3.3 Slave的SQL线程状态
+以下列出了slave的SQL线程 State 字段中最常见的几种状态：
+Reading event from the relay log
+从中继日志里读到一个事件以备执行。
+Has read all relay log; waiting for the slave I/O thread to update it
+已经处理完中继日志中的全部事件了，正等待I/O线程写入更新的日志。
+Waiting for slave mutex on exit
+当前线程停止了，这个时间很短。
+--------------
+常见的一些问题：
+一.从库SLAVE启动问题
+由于一些错误操作导致 CHANGE MASTER 和 SLAVE 服务无法启动，系统报错如下：
+*****************************************************************
+Could not initialize master info structure; more error messages can be found in the MySQL error log.
+*****************************************************************
+无法初始化master info结构，MySQL错误日志记录了更详细的错误信息。
+解决方法：
+1、查看MySQL错误日志，如：同步的上一个Position是多少，很多情况下无法启动服务是由于mysql识别的同步始终停留在上一个Position上。
+2、查看master.info和relay-log.info，master.info 记录MASTER相关信息，relay-log.info 记录当前同步日志信息。
+3、停止myslq服务，删除master.info和relay-log.info。
+4、启动mysql服务。
+5、重新CHANGE MASTER，重新启动SLAVE服务。
+二.主从不能同步
+show slave status;报错:Error xxx dosn't exist
+且show slave status\G:
+Slave_SQL_Running: NO
+Seconds_Behind_Master: NULL
+解决方法:
+stop slave;
+set global sql_slave_skip_counter =1 ;
+start slave;
+之后Slave会和Master去同步 主要看:
+Slave_IO_Running: Yes
+Slave_SQL_Running: Yes
+Seconds_Behind_Master是否为0，0就是已经同步了
+2,还需要做的一些优化与监视:
+show full processlist; //查看mysql当前同步线程号
+skip-name-resolve       //跳过dns名称查询，有助于加快连接及同步的速度
+max_connections=1000    //增大Mysql的连接数目，(默认100)
+max_connect_errors=100 //增大Mysql的错误连接数目,(默认10)
+查看日志一些命令
+1,  show master status\G;
+在这里主要是看log-bin的文件是否相同。
+show slave status\G;
+在这里主要是看:
+Slave_IO_Running=Yes
+Slave_SQL_Running=Yes
+如果都是Yes,则说明配置成功.
+2,在master上输入show processlist\G;
+mysql> SHOW PROCESSLIST\G
+*************************** 1. row ***************************
+Id: 2
+User: root
+Host: localhost:32931
+db: NULL
+Command: Binlog Dump
+Time: 94
+State: Has sent all binlog to slave; waiting for binlog to
+be updated
+Info: NULL
+如果出现Command: Binlog Dump,则说明配置成功.
+stop slave    #停止同步
+start slave    #开始同步，从日志终止的位置开始更新。
+SET SQL_LOG_BIN=0|1  #主机端运行，需要super权限，用来开停日志，随意开停，会造成主机从机数据不一致，造成错误
+SET GLOBAL SQL_SLAVE_SKIP_COUNTER=n  # 客户端运行，用来跳过几个事件，只有当同步进程出现错误而停止的时候才可以执行。
+RESET MASTER  #主机端运行,清除所有的日志，这条命令就是原来的FLUSH MASTER
+RESET SLAVE   #从机运行，清除日志同步位置标志，并重新生成master.info
+虽然重新生成了master.info,但是并不起用，最好，将从机的mysql进程重启一下，
+LOAD TABLE tblname FROM MASTER #从机运行，从主机端重读指定的表的数据，每次只能读取一个，受timeout时间限制，需要调整timeout时间。执行这个命令需要同步账号有 reload和super权限。以及对相应的库有select权限。如果表比较大，要增加net_read_timeout 和 net_write_timeout的值
+LOAD DATA FROM MASTER  #从机执行，从主机端重新读入所有的数据。执行这个命令需要同步账号有reload和super权限。以及对相应的库有select权限。如果表比较大，要增加net_read_timeout 和 net_write_timeout的值
+CHANGE MASTER TO master_def_list  #在线改变一些主机设置，多个用逗号间隔,比如
+CHANGE MASTER TO
+MASTER_HOST='master2.mycompany.com',
+MASTER_USER='replication',
+MASTER_PASSWORD='bigs3cret'
+MASTER_POS_WAIT() #从机运行
+SHOW MASTER STATUS #主机运行，看日志导出信息
+SHOW SLAVE HOSTS #主机运行，看连入的从机的情况。
+SHOW SLAVE STATUS (slave)
+SHOW MASTER LOGS (master)
+SHOW BINLOG EVENTS [ IN 'logname' ] [ FROM pos ] [ LIMIT [offset,] rows ]
+PURGE [MASTER] LOGS TO 'logname' ; PURGE [MASTER] LOGS BEFORE 'date'
+show binlog events; #查看主库二进制日志文件内容：
+注意：
+1.主辅库同步主要是通过二进制日志来实现同步的。
+2.在启动辅库的时候必须先把数据同步，并删除日志目录下的：master.info文件。因为master.info记录了上次要连接主库的信息，如果不删除，即使my.cnf里进行了修改，也不起作用。因为读取的还是master.info文件里的信息。
