@@ -1,0 +1,92 @@
+本脚本主要解决批量查看mysql多从状态和修改多从主库指向，并打印出执行结果。适用于主库没有做高可用或是做高可用但是V-IP没有漂移到新的主库上的问题。代码如下：
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import MySQLdb,sys,os,threading,time
+user = 'root'
+passwd = '1q2w3e4r'
+#mysql执行change master命令的用户名和密码
+def log_w(text):#写日志
+    logfile = "slave_res.txt"
+    f = open(logfile,'a+')
+    f.write(text)
+    f.close()
+def db_conn(host,res,flag):
+    text = "###################_____%s_____###################\n\n" % host
+    try:
+        conn = MySQLdb.connect(host = host,port = 6006,user = user,passwd = passwd,charset="utf8",connect_timeout = 5)
+        cursor = conn.cursor(cursorclass = MySQLdb.cursors.DictCursor)
+        sql = '''show slave status'''
+        cursor.execute(sql)#查看当前同步信息
+        alldata = cursor.fetchall()
+        if len(alldata) != 0:#如果没有同步信息则抛错，退出
+            if  alldata[0]['Master_Log_File']==alldata[0]['Relay_Master_Log_File'] and alldata[0]['Read_Master_Log_Pos']==alldata[0]['Exec_Master_Log_Pos']:
+                text = text + "OK"   + '\t' + 'Master_Host:' + str(alldata[0]['Master_Host']) + '   ' + str(alldata[0]['Master_Log_File']) + '   ' + str(alldata[0]['Relay_Master_Log_File']) + '   ' + str(alldata[0]['Read_Master_Log_Pos']) + '   ' + str(alldata[0]['Exec_Master_Log_Pos']) + '   ' + str(alldata[0]['Seconds_Behind_Master'])+'\n'
+                if flag == '1':
+                    try:
+                        sql = "stop slave;"
+                        cursor.execute(sql)#停止从库同步
+                    except Exception, e:
+                        pass
+                    sql = '''change master to master_host='192.10.100.100',master_user='rep_slave',master_password='rEeMAKEreplication6210',master_port=6006,master_log_file='mysql-bin.000100',master_log_pos=300;'''
+                    cursor.execute(sql)#执行change master语句
+                    sql = "start slave;"
+                    cursor.execute(sql)#开启同步
+                    sql = 'show slave status'
+                    cursor.execute(sql)#查看最新的同步信息
+                    alldata = cursor.fetchall()
+                    if  (alldata[0]['Slave_IO_Running'] == 'Yes') and (alldata[0]['Slave_SQL_Running'] == 'Yes'):
+                        text = text + "OK"   + '\t' + 'Master_Host:' + str(alldata[0]['Master_Host']) + '   ' + str(alldata[0]['Master_Log_File']) + '   ' + str(alldata[0]['Relay_Master_Log_File']) + '   ' + str(alldata[0]['Read_Master_Log_Pos']) + '   ' + str(alldata[0]['Exec_Master_Log_Pos']) + '   ' + str(alldata[0]['Seconds_Behind_Master'])+'\n'
+                    else:
+                        text = text + "Start Slave Error"   + '\t' + 'Master_Host:' + str(alldata[0]['Master_Host']) + '\t' + 'Slave_IO_Running: '+str(alldata[0]['Slave_IO_Running']) + '\t' + 'Slave_SQL_Running:' + str(alldata[0]['Slave_SQL_Running']) + '\n'
+            else:
+                text = text + "Slave Error"   + '   ' + 'Master_Host:' + str(alldata[0]['Master_Host']) + '   ' + str(alldata[0]['Master_Log_File']) + '   ' + str(alldata[0]['Relay_Master_Log_File']) + '   ' + str(alldata[0]['Read_Master_Log_Pos']) + '   ' + str(alldata[0]['Exec_Master_Log_Pos']) + str(alldata[0]['Seconds_Behind_Master'])+'\n'
+        else:
+            text = text + "Error,This host not set slave information"
+        cursor.close()
+        conn.close()
+    except Exception, e:
+        text = text + "Error" + '\t' + str(e)
+    res.append(text)
+def start(flag):
+        threads = []
+        res = []
+        host_list = ['192.168.1.114','192.168.1.120']
+        for host in host_list:
+            t = threading.Thread(target=db_conn,args=(host,res,flag))
+            t.setDaemon(True)
+            threads.append(t)
+        for i in range(len(threads)):
+            threads[i].start()
+            time.sleep(0.1)
+        for i in range(len(threads)):
+            threads[i].join()
+        for i in res:
+            if "Error" in i:
+                print "\033[1;31;40m%s\033[0m" % i
+            else:
+                print i
+            log_w(i)
+        if flag == '1':
+            text = "\nChange master finished"
+            print text
+            log_w(text)
+        else:
+            text = "\nSHOW SLAVE STATUS complete"
+            print text
+            log_w(text)
+        text = "\n\n###################  %s   ###################\n\n" % time.strftime("%Y-%m-%d %H:%M:%S")
+        print text
+        log_w(text)
+def main():
+    print
+    print "请选择操作类型：\n\n0:查看所有从库的同步状态\n1:改变所有从库的主库指向\n"#.decode("utf-8").encode("GBK")
+    for i in range(3):
+        choose = raw_input('Your choose : ')
+        if choose == '0' or choose == '1':
+            start(choose)
+            break
+        else:
+            print "Error,please Enter right noumber again ."
+    print
+if __name__=='__main__':
+    main()
