@@ -1,0 +1,70 @@
+mysql主从的binlog定时删除是很重要的，一般是通过expire_logs_days = 10来设置binlog保留的天数（mysql5.0一下版本不支持），但有时这还不够，假如有几天的日志量非常大，硬盘可能会满，所以不但要设置保留的天数，还要监控硬盘的空间使用情况。写了一个脚本，适合各个版本的mysql，保留3天的日志，当存放日志的硬盘使用率超过80%，则保留2天，但至少会保留一天的binlog日志文件。
+#!/bin/env python 
+# -*- coding: utf-8 -*- 
+############################################################## 
+#查看存在binlog的目录位置并找出3天前的最后一个bin-log文件名字 
+#删除3天以前的binlog文件，删除之后data1目录挂载的硬盘使用率超 
+#过的80%的话，继续删除2天前的日志文件，至少保留一天的日志。 
+############################################################## 
+ 
+import os,sys,time,MySQLdb 
+ 
+def log_w(text): 
+    logfile = "/usr/local/zabbix/bin/delet.log" 
+    now = time.strftime("%Y-%m-%d %H:%M:%S") 
+    tt = now + "\t" + str(text) + "\n" 
+    f = open(logfile,'a+') 
+    f.write(tt) 
+    f.close() 
+ 
+def mysql_conn(port,lastlog,days): 
+    try: 
+        center_ip = '127.0.0.1' 
+        center_user = 'repl_monitor' 
+        center_passwd = 'VQMQLGwTaw3k0UV8' 
+        sql = "PURGE MASTER LOGS TO '%s';" % lastlog 
+        conn = MySQLdb.connect(host = center_ip,port = int(port),user = center_user,passwd = center_passwd,connect_timeout=5) 
+        cursor = conn.cursor()  
+        cursor.execute(sql) 
+        alldata = cursor.fetchall() 
+        cursor.close() 
+        conn.close() 
+        text = "Deltet before %s days binlog,deltet %s before !" % (days,lastlog) 
+        log_w(text) 
+    except Exception,e: 
+        log_w(e) 
+ 
+def find_logdir(): 
+    conn = "find / -name binlog|grep -v usr" 
+    logdir_list = os.popen(conn).readlines() 
+    if len(logdir_list) != 0: 
+        for logdir in logdir_list: 
+            datadir = logdir.strip().split("/")[1] 
+            if "mysql_log" in logdir.strip(): 
+                port = 3306 
+            else: 
+                port = logdir.strip().split("/")[3].split("-")[-1] 
+            days = 3 
+            while 1: 
+                conn = "find %s -mtime %s|sort" % (logdir.strip(),days) 
+                count = os.popen(conn).readlines() 
+                if len(count) != 0: 
+                    lastlog = count[-1].strip().split("/")[-1] 
+                    mysql_conn(port,lastlog,days) 
+ 
+                df = "df -h|grep -e '%s$'|awk '{print $5}'|awk -F '%%' '{print $1}'" % datadir 
+                disk = os.popen(df).read().strip() 
+                if not disk: 
+                    break 
+                else: 
+                    if int(disk) < 80: 
+                        break 
+                    else: 
+                        days = days - 1 
+                        if days == 1: 
+                            break 
+    else: 
+        sys.exit() 
+ 
+if __name__ == "__main__": 
+    find_logdir() 
