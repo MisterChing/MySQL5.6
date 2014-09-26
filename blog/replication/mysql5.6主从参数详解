@@ -1,0 +1,79 @@
+ mysql5.6的主从相当的不错，增加了不少参数，提升了主从同步的安全和效率，以下是mysql5.6主从参数详解。
+
+#########################################
+server_id = 2
+#binlog
+log-bin = /data1/mysql/binlog/binlog
+binlog_format = ROW
+binlog-row-image = minimal
+#gtid_mode = ON
+#enforce-gtid-consistency = true
+binlog_cache_size = 4M
+max_binlog_size = 1G
+max_binlog_cache_size = 2G
+sync_binlog = 1
+slave-skip-errors = 1062
+expire_logs_days = 3
+slave_parallel_workers = 4
+#relay log
+relay-log = /data1/mysql/relaylog/relaylog
+max_relay_log_size = 1G
+relay_log_purge = 1
+relay_log_recovery = 1
+binlog_checksum = CRC32
+slave_allow_batching = 1
+master_verify_checksum = 1
+slave_sql_verify_checksum = 1
+binlog_rows_query_log_events = 1
+master_info_repository = TABLE
+relay_log_info_repository = TABLE
+log_slave_updates
+#########################################
+
+sync_binlog = 1
+默认情况下，并不是每次写入时都将binlog与硬盘同步。因此如果操作系统或机器(不仅仅是MySQL服务器)崩溃，有可能binlog中最后的语句丢 失了。要想防止这种情况，你可以使用sync_binlog全局变量(1是最安全的值，但也是最慢的)，使binlog在每N次binlog写入后与硬盘 同步。即使sync_binlog设置为1,出现崩溃时，也有可能表内容和binlog内容之间存在不一致性。如果使用InnoDB表，MySQL服务器 处理COMMIT语句，它将整个事务写入binlog并将事务提交到InnoDB中。如果在两次操作之间出现崩溃，重启时，事务被InnoDB回滚，但仍 然存在binlog中。可以用--innodb-safe-binlog选项来增加InnoDB表内容和binlog之间的一致性。(注释：在MySQL 5.1中不需要--innodb-safe-binlog；由于引入了XA事务支持，该选项作废了），该选项可以提供更大程度的安全，使每个事务的 binlog(sync_binlog =1)和(默认情况为真)InnoDB日志与硬盘同步，该选项的效果是崩溃后重启时，在滚回事务后，MySQL服务器从binlog剪切回滚的 InnoDB事务。这样可以确保binlog反馈InnoDB表的确切数据等，并使从服务器保持与主服务器保持同步(不接收 回滚的语句)。
+
+server_id = 2之前的写法是：server-id = 2
+
+gtid_mode = ON
+enforce-gtid-consistency = true
+这两个参数是启用mysql5.6中的UUID同步模式，两个参数必须一起打开，否则报错，slave在做同步复制时，无须找到binlog日志和POS点，直接change master to master_auto_position=1即可，自动找点同步。
+GTID的局限性： （鉴于这些局限性，慎用）
+1.GTID同步复制是基于事务。所以Myisam表不支持，这可能导致多个GTID分配给同一个事务。
+2.CREATE TABLE ... SELECT语句不支持。因为该语句会被拆分成create table 和insert两个事务，并且这个两个事务被分配了同一个GTID，这会导致insert被备库忽略掉。
+3.不支持CREATE TEMPORARY TABLE、DROP TEMPORARY TABLE 临时表操作。
+启用之后进行同步语句：
+CHANGE MASTER TO MASTER_HOST='60.2.212.190', MASTER_PORT=3306, MASTER_USER='repl',MASTER_PASSWORD='H7RYbCkGHmm_P1XO', master_auto_position=1;
+不启动的话同步语句和之前一样：
+change master to
+master_host='192.168.100.190',
+master_user='repl',
+master_password='123456',
+master_port=3306,
+master_log_file='binlog.000001',
+master_log_pos=1287;
+start slave;
+在5.6的版本中，启动主从为：start slave,而之前用slave start也可以。
+
+binlog-row-image=minimal，这个选项允许应用程序只能对行的镜像数据进行复制，而不在关心行是否已经进行了DML操作。这提高了主从机器的复制吞吐量，减少了二进制日志所占用的磁盘空间、网络资源和内存占用。
+
+slave_parallel_workers = 4 默认是0，不开启，最大并发数为1024个线程。主从复制启用4个sql线程，提高从服务器吞吐量，减少延迟,使用并发的 SQL 线程对不同数据库并行应用事件
+
+binlog_checksum = CRC32
+slave_allow_batching = 1
+master_verify_checksum = 1
+slave_sql_verify_checksum = 1
+binlog_rows_query_log_events = 1
+这四个参数是启用binlog/relaylog的校验，防止日志出错
+
+relay_log_purge = 1
+relay_log_recovery = 1
+这两个是启用relaylog的自动修复功能，避免由于网络之类的外因造成日志损坏，主从停止。
+
+master_info_repository = TABLE
+relay_log_info_repository = TABLE
+这两个参数会将master.info和relay.info保存在表中，默认是Myisam引擎，官方建议用
+alter table  slave_master_info engine=innodb;
+alter table  slave_relay_log_info engine=innodb;
+alter table  slave_worker_info engine=innodb;
+改为Innodb引擎，防止表损坏后自行修复。
