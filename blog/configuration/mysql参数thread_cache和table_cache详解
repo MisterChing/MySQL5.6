@@ -1,0 +1,71 @@
+THREAD_CACHE
+MySQL里面为了提高客户端请求创建连接过程的性能,提供了一个连接池也就是 Thread_Cache池,将空闲的连接线程放在连接池中,而不是立即销毁.这样的好处就是,当又有一个新的请求的时候,mysql不会立即去创建连接 线程,而是先去Thread_Cache中去查找空闲的连接线程,如果存在则直接使用,不存在才创建新的连接线程.
+有关 Thread_Cache在MySQL有几个重要的参数,简单介绍如下:
+thread_cache_size
+Thread_Cache 中存放的最大连接线程数.在短连接的应用中Thread_Cache的功效非常明显,因为在应用中数据库的连接和创建是非常频繁的,如果不使用 Thread_Cache那么消耗的资源是非常可观的!在长连接中虽然带来的改善没有短连接的那么明显,但是好处是显而易见的.但并不是越大越好大了反而 浪费资源这个的确定一般认为和物理内存有一定关系,如下:
+1G  —> 8
+2G  —> 16
+3G  —> 32
+>3G  —> 64
+如果短连接多的话可以适当加大.
+thread_stack
+每个连接被创建的时候,mysql分配给它的内存.这个值一般认为默认就可以应用于大部分场景了,除非必要非则不要动它.
+thread_handing
+运用Thread_Cache处理连接的方式,5.1.19添加的新特性.有两个值可选[no-threads|one-thread-per-connection] 看字面意思大家也该猜出八九分了,呵呵,no-threads 服务器使用一个线程,one-thread-per-connection 服务器为每个客户端请求使用一个线程.原手册中提到,no-threads是在Linux下调试用的.
+mysql> show variables like ‘thread%’;
++——————-+—————————+
+| Variable_name     | Value                     |
++——————-+—————————+
+| thread_cache_size | 32                        |
+| thread_handling   | one-thread-per-connection |
+| thread_stack      | 196608                    |
++——————-+—————————+
+3 rows in set (0.01 sec)
+mysql> show status like ‘%connections%’;
++———————-+——–+
+| Variable_name        | Value  |
++———————-+——–+
+| Connections          | 199156 |
+| Max_used_connections | 31     |
++———————-+——–+
+2 rows in set (0.00 sec)
+mysql> show status like ‘%thread%’;
++————————+——–+
+| Variable_name          | Value  |
++————————+——–+
+| Delayed_insert_threads | 0      |
+| Slow_launch_threads    | 0      |
+| Threads_cached         | 3      |
+| Threads_connected      | 6      |
+| Threads_created        | 8689 |
+| Threads_running        | 5      |
++————————+——–+
+6 rows in set (0.00 sec)
+通过以上3个命令,可以看到服务器的 thread_cache池中最多可以存放32个连接线程,为每个客户端球使用一个线程.为每个连接的线程分配192k的内存空间.
+服 务器总共有199156次连接,最大并发连接数为31,当前在thread_cashe池中的连接数为3个,连接数为6个,处于活跃状态的有5个,共创建 了8689次连接.显然这里以短连接为主.可以算出thread_cache命中率,公式为:
+Thread_Cache_Hit=(Connections-Thread_created)/Connections*100%
+当前服务器的Thread_cache命中率约为95.6%这个结果我还是比较满意的.但是可以看出 thread_cache_size有点多余改成16或8更合理一些.
+TABLE_CACHE(5.1.3及以后 版本又名TABLE_OPEN_CACHE)
+由于MySQL是多线程的机制,为了提高性能,每个线程都是独自打开自己需要的表的文件描 述符,而不是通过共享已经打开的.针对不同存储引擎处理的方法当然也不一样.
+在myisam表引擎中,数据文件的描述符 (descriptor)是不共享的,但是索引文件的描述符却是所有线程共享的.Innodb中和使用表空间类型有关,假如是共享表空间那么实际就一个数 据文件,当然占用的数据文件描述符就会比独立表空间少.
+个人感觉有点像php里面的fopen打开一个连接,操作完数据之后,并不立即 关闭,而是缓存起来,等待下一个连接这个文件的请求就不必去重新打开文件了,不知样理解对不对,哈.
+手册上有段关于打开表时的描述:
+A MyISAM table is opened for each concurrent access. This means the table needs to be opened twice if two threads access the same table or if a thread accesses the table twice in the same query (for example, by joining the table to itself). Each concurrent open requires an entry in the table cache. The first open of any MyISAM table takes two file descriptors: one for the data file and one for the index file. Each additional use of the table takes only one file descriptor for the data file. The index file descriptor is shared among all threads.
+如果你正用 HANDLER tbl_name OPEN语句打开一个表，将为该线程专门分配一个表。该表不被其它线程共享，只有线程调用HANDLER tbl_name CLOSE或线程终止后才被关闭。表关闭后，被拉回表缓存中(如果缓存不满)。
+mysql手册上给的建议大小 是:table_cache=max_connections*n
+n表示查询语句中最大表数, 还需要为临时表和文件保留一些额外的文件描述符。
+这个数据遭到很多质疑,table_cache够用就好,检查 Opened_tables值,如果这个值很大,或增长很快那么你就得考虑加大table_cache了.
+在下面的条件下，未使用的表 将被关闭并从表缓存中移出：
+· 当缓存满了并且一个线程试图打开一个不在缓存中的表时。
+· 当缓存包含超过table_cache个条目，并且缓存中的表不再被任何线程使用。
+· 当表刷新操作发生。当执行FLUSH TABLES语句或执行mysqladmin flush-tables或mysqladmin refresh命令时会发生。
+当表缓存满时，服务器使用下列过程找到一个缓存入口来使用：
+· 当前未使用的表被释放，以最近最少使用顺序。
+· 如果缓存满了并且没有表可以释放，但是一个新表需要打开，缓存必须临时被扩大。
+如果缓存处于一个临时扩大状态并且一个表从在用变为不在用状态，它被关闭并从缓存中释放。
+几个关于table_cache的 状态值:
+1  table_cache：所有线程打开的表的数目。增大该值可以增加mysqld需要的文件描述符的数量。默认值是64.
+2  open_tables：当前打开的表的数量.
+3  opened_tables ：Number of table cache misses，如果opened_tables较大，table_cache 值可能太小.
+4  Open_table_definitions : The number of cached .frm files. This variable was added in MySQL 5.1.3.
+5  Opened_table_definitions : The number of .frm files that have been cached. This variable was added in MySQL 5.1.24.
