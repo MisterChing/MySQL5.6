@@ -1,0 +1,173 @@
+1.  为什么要用单机多实例
+目前互联网的MySQL的服务器都配置了Flash卡或者SSD磁盘，IO能力得到大幅的提高；而Intel的CPU目前的能力不比IBM小型机的CPU差，轻松就是24或者48个超线程；内存现在也很便宜，一般的服务器配上128G的内存也用不了多少钱。
+CPU，MEMORY和IO的问题解决以后，反而是MySQL不能充分利用服务器的资源了，短时间内由于MySQL代码重构和各种锁的分拆，并发编程的难度等问题，导致MySQL的对机器利用率又不能得到非常大的提升，所以我们需要尽量在一个服务器上运行多个MySQL，以充分发挥服务器的资源。
+一个服务器上运行多个MySQL，我们最关心的是多个实例之间资源竞争的问题，而解决方案：第一个想到的可能就是使用xen或者vmware等虚拟机软件来在同一个服务器上虚拟多个服务器，每个虚拟机上跑独立的MySQL。但是众所周知，虚拟机软件本身要耗费资源，5%到20%不等。有没有一种即简单又能够满足实例资源分离的方案列？
+目前，比较实用的，并且被广泛用于线上资源隔离的就是CGroup了。下面我们就来了解一下CGroup。
+ 
+2.  CGROUP简介
+CGroup是Linux内核提供的一种资源隔离手段，分别对CPU，MEMORY，IO等资源进行隔离，并且把这些隔离分为多个子系统。
+摘录王喆锋http://files.cnblogs.com/lisperl/cgroups%E4%BB%8B%E7%BB%8D.pdf中的介绍如下：
+blkio -- 这个子系统为块设备设定输入/输出限制，比如物理设备（磁盘，固态硬盘，USB 等等）。
+cpu -- 这个子系统使用调度程序提供对 CPU 的 cgroup 任务访问。
+cpuacct -- 这个子系统自动生成 cgroup 中任务所使用的 CPU 报告。
+cpuset -- 这个子系统为 cgroup 中的任务分配独立 CPU（在多核系统）和内存节点。
+devices -- 这个子系统可允许或者拒绝 cgroup 中的任务访问设备。
+freezer -- 这个子系统挂起或者恢复 cgroup 中的任务。
+memory -- 这个子系统设定 cgroup 中任务使用的内存限制，并自动生成由那些任务使用的内存资源报告。
+net_cls -- 这个子系统使用等级识别符（classid）标记网络数据包，可允许 Linux 流量控制程序（tc）识别从具体 cgroup 中生成的数据包。
+ns -- 名称空间子系统。
+简单来说就是CGroup会监控进程中CPU，MEMORY，IO等各种资源，并根据用户的配置对它进行限制。它的消耗比虚拟机的消耗就要小的多了。
+下面我们通过具体的配置简单了解CGroup的功能。
+ 
+3.  CGROUP配置
+例如：我们在某个服务器上计划启动4个实例，需要设置每个实例的CPU只能用8个超线程，内存最大只能到16G。该服务器一共有48个超线程。
+这里我们对MySQL不配置IO限制，也就是说我们这里允许IO有一定的竞争，我们希望从应用模块上尽量把一些耗费IO的时间段分隔开，各个应用模块的定时任务，全表扫描等操作对于在同一个服务器上的各个不同实例我们尽量分离。
+这里我们也不开启cpuacct等CPU报告的子系统，节省服务器资源。
+针对CPU和MEMORY等资源分离的话，就需要配置如下：
+ 
+3.1.  CGCONFIG配置
+
+在/etc/cgconfig.conf，我们只对cpu和内存做限制，所以只需要挂载两个子系统。另外，我们在服务器上计划启动4个实例，这四个实例分别属于四个组，mysql_g1, mysql_g2, mysql_g3, mysql_g4。目前我们限制它们都在8个超线程并且每个实例的内存不超过16G。如下：
+mount {
+        cpuset  = /cgroup/cpuset;
+        memory  = /cgroup/memory;
+        blkio = /cgroup/cpu_and_mem;
+}
+group mysql_g1 {
+        cpuset {
+                cpuset.cpus = "33,35,37,39,41,43,45,47";
+                cpuset.mems = "0";
+        }
+        memory {
+                memory.limit_in_bytes=17179869184;
+                memory.swappiness=0;
+        }
+}
+group mysql_g2 {
+        cpuset {
+                cpuset.cpus = "32,34,36,38,40,42,44,46";
+                cpuset.mems = "0";
+        }
+        memory {
+                memory.limit_in_bytes=17179869184;
+                memory.swappiness=0;
+        }
+}
+group mysql_g3 {
+        cpuset {
+                cpuset.cpus = "17,19,21,23,25,27,29,31";
+                cpuset.mems = "0";
+        }
+        memory {
+                memory.limit_in_bytes=17179869184;
+                memory.swappiness=0;
+        }
+}
+group mysql_g4 {
+        cpuset {
+                cpuset.cpus = "16,18,20,22,24,26,28,30";
+                cpuset.mems = "0";
+        }
+        memory {
+                memory.limit_in_bytes=17179869184;
+                memory.swappiness=0;
+        }
+}
+group mysql_admin {
+    cpuset {
+        cpuset.cpus = "1,3,5,7,9,11,13,15";
+        cpuset.mems="0";
+    }
+    memory {
+        memory.limit_in_bytes=2147483648;
+        memory.memsw.limit_in_bytes=2684354560;
+        memory.swappiness=0;
+    }
+    blkio {
+        blkio.throttle.read_iops_device = "8:0 2000";
+    }
+}
+ 
+3.1.1.   配置详解
+
+CGoup的配置主要包括两个，一个是mount，一个是group。
+ 
+1.MOUNT
+这里，mount表示挂载了两个子系统：cpuset，memory，blkio，分别对cpu，内存和IO能力进行限制。
+mount {
+      cpuset = /cgroup/cpu_and_mem;
+      memory = /cgroup/cpu_and_mem;
+      blkio = /cgroup/cpu_and_mem;
+}
+这里其实对应的linux操作系统中的/cgroup/cpu_and_mem这个目录。在linux里面，一切可以被视为文件，在这个目录里面有各种配置文件以及状态信息。
+其实cgconfig也就是帮你把配置文件中的配置整理到/cgroup/cpu_and_mem这个目录里面，上面的mount对应的命令为：
+mkdir -p /cgroup/cpu_and_mem
+mount -t cgroup -o cpu,memory,blkio none /cgroup/cpu_and_mem
+ 
+ 2.GROUP设置
+对于mysql_g1的限制中，
+ CPU限制
+CPU我们限制该组只能在33,35,37,39,41,43,45,47一共8个超线程上运行。cpuset.mems是用来设置内存节点的。
+        cpuset {
+                cpuset.cpus = "33,35,37,39,41,43,45,47";
+                cpuset.mems = "0";
+        }
+其实cgconfig也就是帮你把配置文件中的配置整理到/cgroup/cpu_and_mem这个目录里面，比如你需要动态设置mysql_group1/ cpuset.cpus的CPU超线程号，可以采用如下的办法。
+echo "33,35,37,39,41,43,45,47" > mysql_group1/ cpuset.cpus
+现在较新的服务器CPU都是numa结构，使用numactl --hardware可以看到numa各个节点的CPU超线程号，以及对应的节点号。
+输出如下：
+[root@test2 ~]# numactl --hardware
+available: 2 nodes (0-1)
+node 0 cpus: 0 2 4 6 8 10 12 14
+node 0 size: 24575 MB
+node 0 free: 15738 MB
+node 1 cpus: 1 3 5 7 9 11 13 15
+node 1 size: 24575 MB
+node 1 free: 23945 MB
+node distances:
+node   0   1
+  0:  10  20
+  1:  20  10
+我们这里关闭了numa，所以所有的cpuset.mems节点都是0。
+这里33,35,37,39,41,43,45,47是间隔2个来的，也是因为我们希望限制MySQL运行在一个numa node上。
+另外顺带提一下，关闭numa有三种方式：BIOS，numa=off和程序启动时内存interactive分配。
+BIOS关闭是最彻底的，弊端是每个机型都不太一样；在/etc/grub中设置numa=off启动操作系统时关闭比较统一，方便操作；但是不如BIOS关闭那么彻底；程序启动时关闭能够更精确的控制numa使用，但是操作比较麻烦，每次启动都需要在前面加numactl --cpunodebind=$BIND_NO --localalloc前缀等。
+MEMORY限制
+内存限制我们主要限制了MySQL可以使用的内存最大大小memory.limit_in_bytes=16G。而设置swappiness为0是为了让操作系统不会将MySQL的内存匿名页交换出去。
+        memory {
+                memory.limit_in_bytes=17179869184;
+                memory.swappiness=0;
+        }
+ IO限制
+这里我们也简单看一下IO限制的配置，在某些情况下，我们会单独分一个mysql_admin的组，用于限制xtrabackup，mysqldump等已知的耗费IO的程序的IO能力。
+比如，我们设置/dev/sda的磁盘读iops最大只能到2000，那么我们就可以设置如下：
+blkio {
+    blkio.throttle.read_iops_device = "8:0 2000";
+}
+其中比较奇怪的是8:0，这是LINUX ALLOCATED DEVICES，具体信息可以参考：https://www.kernel.org/doc/Documentation/devices.txt。并且使用ls -l命令可以查看对应设备的编号：
+[root@test2 ~]# ls -l /dev/sda
+brw-rw---- 1 root disk 8, 0 Sep 14 22:06 /dev/sda
+这里备份程序其实主要耗费的是读，所以我们设置了blkio.throttle.read_iops_device。Blkio其实也提供了写IOPS，读/写吞吐量的限制。大家可以根据自己的需求进行设置，也可以参考褚霸：http://blog.yufeng.info/archives/2001的测试。
+cpuset，memory和blkio其实还有很多其他的可以设置的配置项。我们这里就不一一列举了。
+ 
+3.2.  CGRULE配置
+
+上面我们对分组进行了设置，下面我们就需要设置什么样的进程应该归到哪个分组。
+在我们的示例配置/etc/cgrules.conf中，我们设置任何用户只要是使用mysqld_safe1启动的命令为mysql_g1组，这样就可以限制它的CPU和内存使用。其他的四个实例同样进行设置如下：
+*:/home/mysql/program/Percona-Server-5.5.33-rel31.1-566-static-openssl-1.0.1e.Linux.x86_64 /bin/mysqld_safe1    *    mysql_g1
+*:/home/mysql/program/Percona-Server-5.5.33-rel31.1-566-static-openssl-1.0.1e.Linux.x86_64 /bin/mysqld_safe2    *    mysql_g2
+*:/home/mysql/program/Percona-Server-5.5.33-rel31.1-566-static-openssl-1.0.1e.Linux.x86_64 /bin/mysqld_safe3    *    mysql_g3
+*:/home/mysql/program/Percona-Server-5.5.33-rel31.1-566-static-openssl-1.0.1e.Linux.x86_64 /bin/mysqld_safe4    *    mysql_g4
+*:/home/mysql/program/Percona-Server-5.5.33-rel31.1-566-static-openssl-1.0.1e.Linux.x86_64 /bin/mysqldump     *    mysql_admin
+这里注意，配置中命令需要写全路径，并且，我们现在是对MySQL一个程序分四个组，所以我们故意对mysqld_safe进行了链接，构造了同一个二进制程序的4个拷贝，用于在启动的时候进行区别。
+Cgroup限制对子进程是有效的，这里我们设置了mysqld_safe1对应的cpu，memory，对应的mysqld_safe的子进程和各个线程都会收到cgroup的限制。
+另外，不仅配置中命令需要写全路径，程序启动的时候也需要使用全路径。
+ 
+4.  CGROUP配置生效
+配置完成以后我们需要使用:
+/etc/init.d/cgconfig start
+/etc/init.d/cgred start
+来使得上述配置生效。
+使用全路径的mysqld_safe1启动MySQL，就可以查看MySQL是否处于cgroup的限制中了，利用
+ps -eLo pid,cgroup,cmd |grep –i mysqld
+可以看到mysqld的cgroup情况。
