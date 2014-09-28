@@ -1,0 +1,88 @@
+在MySQL Performance Blog博客上看到一篇文章介绍now()和sysdate()函数。
+想起很多朋友专门问在MySQL里面提供now()和sysdate()函数，都是表示取得当前时间，他们之间有什么区别。我们下面来详细看一下
+首先大家可以看一下下面的一个诡异现象：
+ 
+mysql> SELECT NOW(),SYSDATE();
++---------------------+---------------------+
+| NOW()             | SYSDATE()         |
++-----------------------------+----------------------------+
+| 1999-01-01 00:00:00 | 2012-12-05 09:50:03 |
++---------------------------+----------------------------+
+1 row in set (0.00 sec)
+ 
+很有意思吧？
+sysdate()得到的时间是当前时间，而now()取出来的时间竟然是“1999-01-01 00:00:00”。
+首先申明，我不是PS或者修改得来的，你看完本文，我会教你在你的MySQL上也得出这样的结果。
+ 
+ 
+ 
+另外我们看一下，now()和sysdate()的另外一个区别：
+ 
+mysql> SELECT NOW(), SLEEP(2), NOW();
++---------------------+----------+---------------------+
+| NOW()              | SLEEP(2) | NOW(             |
++-----------------------------+--------------+-----------------------------+
+| 2006-04-12 13:47:36 |        0 | 2006-04-12 13:47:36 |
++---------------------------+--------------+----------------------------+
+ 
+mysql> SELECT SYSDATE(), SLEEP(2), SYSDATE();
++---------------------+----------+---------------------+
+| SYSDATE()          | SLEEP(2) | SYSDATE()         |
++-----------------------------+--------------+----------------------------+
+| 2006-04-12 13:47:44 |        0 | 2006-04-12 13:47:46 |
++---------------------------+--------------+----------------------------+
+ 
+在使用now()的情况下，虽然我们sleep了2秒，但是大家可以看到两次now()函数输出的结果都是'2006-04-12 13:47:36'
+而使用sysdate()的情况下，是两个时间'2006-04-12 13:47:44','2006-04-12 13:47:46'，正好相差两秒。
+ 
+ 
+这个最终的原因，大家可以直接查看MySQL的reference对now()函数的解释：http://dev.mysql.com/doc/refman/5.6/en/date-and-time-functions.html#function_now
+我简单给大家翻译一下。
+now()函数，返回的是当前的时间。但是当前的时间是怎么取的列？
+首先，对于now()函数来说，它取的时间是语句开始执行的那个时间，并且在语句执行过程中，这个值都不会变。甚至于，你在执行一个存储过程或者触发器时，这个值都是一直不变的。
+这也就解释了，为什么sleep了2秒以后，在SELECT NOW(), SLEEP(2), NOW();语句中，取出的时间值是同一个：'2006-04-12 13:47:36'。
+ 
+然后：now()函数取的当前时间从哪里来？它取自mysql的一个变量"TIMESTAMP"。
+很奇怪吧？
+其实这个是由于MySQL的replication导致的。你可以想象一下，一个insert into  gguard values (3,now());语句在两台MySQL上插入的值是不是一样？now()如果像sysdate()一样取的是机器的系统时间，那么在MySQL的主库和备库执行同一个这样的SQL语句，主库和备库的这一条数据肯定就不一致了。
+主备库不一致的问题必须要解决，两种解决方式：
+1、修复这种问题。
+2、不使用statement的语句级别复制，而是类似于oracle的，将数据变更记录下来，原样在备库执行一遍。
+第二种方式就是大家熟知的，binlog_format=ROW的方式。第一种就是now()不使用机器系统时间，而是取mysql的变量"TIMESTAMP"值。
+另外的类似的变量还包括insert_id（用于复制时，AUTO_INCREMENT的取值）等
+ 
+利用mysqlbinlog你可以看到每个binlog event都有一个时间值。
+# at 441
+#121205 10:06:52 server id 5  end_log_pos 526     Query    thread_id=5  exec_time=0  error_code=0
+SET TIMESTAMP=1354673212.982122/*!*/;
+BEGIN
+/*!*/;
+# at 526
+#121205 10:06:52 server id 5  end_log_pos 642     Query    thread_id=5  exec_time=0  error_code=0
+use `test`/*!*/;
+SET TIMESTAMP=1354673212.982122/*!*/;
+insert into  gguard values (3,now())
+/*!*/;
+# at 642
+#121205 10:06:52 server id 5  end_log_pos 669     Xid = 26
+COMMIT/*!*/;
+备库复制执行时，SQL thread在做每个insert或者其他操作前首先要执行SET TIMESTAMP这样的动作，保证now()函数在statement模式下在备库和主库一样。
+这里还有另外一种含义：sysdate()函数在statement模式下，主库和备库会不一致，也就是说sysdate在statement复制模式下是不安全的。
+ 
+那么怎么实现上面的SELECT NOW(),SYSDATE();查询出来的时间不一样列，你只需要在之前执行：
+ 
+SET TIMESTAMP=UNIX_TIMESTAMP('1999-01-01');
+SELECT NOW(),SYSDATE();
+ 
+体验now()和sysdate()的神秘吧 :)
+ 
+ 
+注意：
+ 
+CURRENT_TIMESTAMP() LOCALTIME() LOCALTIMESTAMP()都是now()函数的同义词，不讨论。
+sysdate()没有同义词。
+如果你觉得now()函数就够了，你不需要每次都取当前的机器系统时间，那么你可以在MySQL启动时指定--sysdate-is-now，这样的话MySQL会把sysdate()当成now()的一个同义词。
+ 
+ 
+参考：
+http://www.mysqlperformanceblog.com/2012/11/28/replication-of-the-now-function-also-time-travel/
