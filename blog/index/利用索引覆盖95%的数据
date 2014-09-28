@@ -1,0 +1,90 @@
+获得字符串列索引前缀长度
+大家都知道索引可以极大的加快查询的速度，但是索引也是有代价的，它需要消耗额外的存储空间，对数据的更新操作也涉及到对应索引的一致性更新。
+而对某些特殊的字符串索引来说，我们并不一定要整个字段长度都索引起来，只需要索引一定的前缀大小就可以达到快速查找指定数据的目的。
+比如name字段记录的是人的名字，定义为：
+name varchar(128) NOT NULL DEFAULT '' COMMENT '姓名'
+
+之所以定义为这么长，是为了适应国外超长的名字。有兴趣的同学可以google一下“世界最长人名”。
+但是正常的人名其实并不长，所以我们只需要索引前几个就行了。
+所以如何确定索引的长度以保证更好的选择性，前缀性也是很多人研究的课题和论文题目。如果你把整个列都索引起来，对应的选择性当然非常高，但是浪费的空间却非常多；如果只索引列的部分前缀，那么有可能选择性比较差，达不到通过索引提高查询速度的目的。
+我们这里不分析也不介绍现有的确定索引前缀长度的方法:) 仅仅介绍一种获得索引前缀长度的方法，它能保证95%的列数据都能索引起来。
+按照Dixon的理论，一般来说，你如果索引了95%的字符串前缀，它就可以满足大部分情况过滤需求。
+对应的我们可以采用这样的sql来获得我们需要的95%字符前缀长度：
+select min(cc.l) as ninty_five_percent
+from (
+select length(filename) as l, count(distinct filename) as c, @ccount := @ccount + count(distinct filename) as t
+from filenames, (select @ccount := 0) as foo
+group by length(filename)
+) as cc where cc.t >= (@ccount*0.95) order by cc.t;
+
+例如：
+现在有一个filename表
+[5.6.10-log root@woqu-mysql3 /root root@127.0.0.1:test 15:31:09>show create table filenames\G
+*************************** 1. row ***************************
+Table: filenames
+Create Table: CREATE TABLE `filenames` (
+`id` int(11) NOT NULL,
+`filename` varchar(255) NOT NULL,
+PRIMARY KEY (`id`),
+KEY `filename` (`filename`)span>
+) ENGINE=InnoDB DEFAULT CHARSET=latin1
+1 row in set (0.00 sec)
+
+该表有10条数据如下：
+[5.6.10-log root@woqu-mysql3 /root root@127.0.0.1:test 15:30:43>select * from filenames;
++----+-----------------------+
+| id | filename |
++----+-----------------------+
+| 1 | sdfsdf |
+| 4 | sdfsdsf32sf |
+| 3 | sdfsdsfds3fsf |
+| 8 | sdfsf |
+| 2 | sdfsfsf |
+| 5 | sdsf2f32sf |
+| 9 | sdsf2sffff |
+| 10 | sdsf2sffffdsjjjjjf |
+| 7 | sdsf2sfffffsdfsdfsfsf |
+| 6 | sdsf2sffffsf |
++----+-----------------------+
+10 rows in set (0.00 sec)
+
+我们按照dixon的要求，需要给filename列找到一个最佳的前缀长度，就可以这样来查询：
+[5.6.10-log root@woqu-mysql3 /root root@127.0.0.1:test 15:31:38>select min(cc.l) as ninty_five_percent
+-> from (
+-> select length(filename) as l, count(distinct filename) as c, @ccount := @ccount + count(distinct filename) as t, id,filename
+-> from filenames, (select @ccount := 0) as foo
+-> group by length(filename)
+-> ) as cc where cc.t >= (@ccount*0.95) order by cc.t;
++--------------------+
+| ninty_five_percent |
++--------------------+
+| 21 |
++--------------------+
+1 row in set (0.00 sec)
+
+子查询查询结果如下：
+[5.6.10-log root@woqu-mysql3 /root root@127.0.0.1:test 15:44:37>select length(filename) as l, count(distinct filename) as c, @ccount := @ccount + count(distinct filename) as t, id, filename
+-> from filenames, (select @ccount := 0) as foo
+-> group by length(filename);
++----+---+------+----+-----------------------+
+| l | c | t | id | filename |
++----+---+------+----+-----------------------+
+| 5 | 1 | 1 | 8 | sdfsf |
+| 6 | 1 | 2 | 1 | sdfsdf |
+| 7 | 1 | 3 | 2 | sdfsfsf |
+| 10 | 2 | 5 | 9 | sdsf2sffff |
+| 11 | 1 | 6 | 4 | sdfsdsf32sf |
+| 12 | 1 | 7 | 6 | sdsf2sffffsf |
+| 13 | 1 | 8 | 3 | sdfsdsfds3fsf |
+| 18 | 1 | 9 | 10 | sdsf2sffffdsjjjjjf |
+| 21 | 1 | 10 | 7 | sdsf2sfffffsdfsdfsfsf |
++----+---+------+----+-----------------------+
+9 rows in set (0.00 sec)
+
+按length(filename)排序，其中l表示字符串列filename的长度，c表示filename列中长度为l的行数，t表示filename列中长度小于等于l的行数。@count表示filenames表的总行数。
+其中，id和filename列是我特别加进去的，为了更直观的展示该子查询要表达的内容，这样的话，在外面的循环中，我们根据t来排序，找到大于95% * @count的第一个filename列的长度，也就是Dixon所说的95分为数(和中位数对应)。
+ 
+参考：
+http://www.jonathanlevin.co.uk/2011/11/get-95-for-your-index-prefix.html
+http://tech.it168.com/a2011/0711/1216/000001216087_11.shtml
+http://en.wikipedia.org/wiki/Dixon's_Q_test
