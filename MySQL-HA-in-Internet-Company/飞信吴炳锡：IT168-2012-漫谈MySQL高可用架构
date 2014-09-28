@@ -1,0 +1,14 @@
+基于同步的高可用架构及特点：
+主主复制，slave standby，其他slave复制
+可使用的HA软件：Keepalive，Heartbeat，Redhat Cluster Site，MMM等
+特点：需要专业人员处理；结构简单，容易管理
+
+
+基于DRBD的高可用及特点：
+可使用的HA软件：Keepalive，Heartbeat，Redhat Cluster Site
+底层基于文件系统的的同步：DRBD
+特点：需要专业人员管理；结构简单；Standby机器的Mysql不能打开，需要编写部分切换脚本
+
+
+基于共享存储的高可用及特点：
+可使用的HA软件：Redhat Cluster Site
