@@ -1,0 +1,155 @@
+我们在测试 5.6 GTID 的时候，发现了一个导致主备数据丢失的场景。特别提醒一下使用 MySQL 5.6 并启用了 GTID 的各位，以避免这种情况发生。同时也简单介绍了 GTID 的实现原理。
+
+  场景描述
+有一台 MySQL 实例 A ，启用了 GTID 。由于 MySQL 服务器空间吃紧，我们手工将主库的所有的 binlog 以及 binlog 的 index 文件都删除掉，并启动了这个 MySQL 实例。此后，本来连在该 MySQL 实例上的备库虽然 show slave status 状态都是正常的，但是却无法获得主库上的任何更新了。备库上的 show slave status 如下：
+[5.6.14-log instance1 root@test1 /root root@127.0.0.1:test 17:42:32 ]
+>show slave status\G
+*************************** 1. row ***************************
+               Slave_IO_State: Waiting for master to send event
+                  Master_Host: 192.168.1.152
+                  Master_User: repl
+                  Master_Port: 9309
+                Connect_Retry: 60
+              Master_Log_File: mysql-bin.000001
+          Read_Master_Log_Pos: 10328743
+               Relay_Log_File: mysql-relay-bin.000002
+                Relay_Log_Pos: 7805047
+        Relay_Master_Log_File: mysql-bin.000001
+              Slave_IO_Running: Yes
+            Slave_SQL_Running: Yes
+              Replicate_Do_DB:
+          Replicate_Ignore_DB:
+           Replicate_Do_Table:
+       Replicate_Ignore_Table:
+      Replicate_Wild_Do_Table:
+  Replicate_Wild_Ignore_Table:
+                   Last_Errno: 0
+                   Last_Error:
+                 Skip_Counter: 0
+          Exec_Master_Log_Pos: 10328743
+              Relay_Log_Space: 7805251
+              Until_Condition: None
+               Until_Log_File:
+                Until_Log_Pos: 0
+           Master_SSL_Allowed: No
+           Master_SSL_CA_File:
+           Master_SSL_CA_Path:
+              Master_SSL_Cert:
+            Master_SSL_Cipher:
+               Master_SSL_Key:
+         Seconds_Behind_Master: 0
+Master_SSL_Verify_Server_Cert: No
+                Last_IO_Errno: 0
+                Last_IO_Error:
+               Last_SQL_Errno: 0
+               Last_SQL_Error:
+  Replicate_Ignore_Server_Ids:
+             Master_Server_Id: 152
+                  Master_UUID: 9300dd57-51da-11e3-989d-3cd92bee36a8
+             Master_Info_File: mysql.slave_master_info
+                    SQL_Delay: 0
+          SQL_Remaining_Delay: NULL
+      Slave_SQL_Running_State: Slave has read all relay log; waiting for the slave I/O thread to update it
+           Master_Retry_Count: 86400
+                  Master_Bind:
+      Last_IO_Error_Timestamp:
+     Last_SQL_Error_Timestamp:
+               Master_SSL_Crl:
+           Master_SSL_Crlpath:
+           Retrieved_Gtid_Set: 9300dd57-51da-11e3-989d-3cd92bee36a8:1-1986
+            Executed_Gtid_Set: 9300dd57-51da-11e3-989d-3cd92bee36a8: 1 - 28123
+                Auto_Position: 0
+1 row in set (0.00 sec)
+
+  GTID 是什么？
+首先，简单描述一下 GTID 。
+GTID 是 MySQL 5.6 新引入了的概念，它是由 UUID 和事务 ID 组成。这样全球所有的服务器的事务都可以用 GTID 来表示。下面就是一个 GTID ：
+9300dd57-51da-11e3-989d-3cd92bee36a8:1
+9300dd57-51da-11e3-989d-3cd92bee36a8 表示的是一台服务器 A 的 UUID ，这个是全球唯一的。然后 1 表示这个服务器 A 的第一个事务。
+引入 GTID 以后， MySQL 就更灵活了：
+l  Slave 在搭建复制的时候，简单的设置 auto_position=1 ，不用去找 MASTER_LOG_FILE 和 MASTER_LOG_POS 这种坑爹的“二进制文件的字节偏移位置”了。
+l  在环形复制或者一主多从的架构下，节点一旦损坏，其他节点之间复制的架构重新搭建起来能够非常简单的完成。
+
+  GTID 实现原理
+我们这里也简单描述一下 GTID 的实现原理。 MySQL 在主库上会把它自己执行过的所有事务的 GTID 都记录下来： gtid_executed 。 gtid_executed 是一个 GTID 的集合，不管是客户自己提交的还是 SQL 线程执行过的数据变更事务，都会被记录在这里。你可以通过 show global variables 查看：
+[5.6.14-log instance1 root@test1 /root root@127.0.0.1:test 1 8 : 22 :32 ]
+>show global variables like 'gtid_executed';
++---------------+------------------------------------------------+
+| Variable_name | Value                                          |
++---------------+------------------------------------------------+
+| gtid_executed | 9300dd57-51da-11e3-989d-3cd92bee36a8:1-8454,
+a01193d9-51da-11e3-989d-94de80b47c01:328691-335254 |
++---------------+------------------------------------------------+
+1 row in set (0.00 sec)
+然后，当备库需要搭建复制的时候，有两种方式：
+l  auto_position=0 ，需要指定 MASTER_LOG_FILE 和 MASTER_LOG_POS 。
+l  auto_position=1 。
+auto_position=0 时，很简单根据指定的 binlog 文件和偏移量， Master 将 binlog 中的各个数据变更事务发送给备库就好了。备库接收到对应的事务，判断是否本机发起的 ( 通过数据变更事务记录的 server_id 来判断 ) ，如果不是本机发起的，就直接执行。
+在 auto_position=1 时，备库将自己的 gtid_executed 的事务集合传给 Master ， Master 找到第一个包含有非备库 gtid_executed 事务集中数据变更的 binlog ，将 binlog 中的各个 event 发送给备库。这样备库首先判断是否本机发起的，然后判断发送过来的各个数据变更事务是否在本机执行过。没有执行过的事务都需要在本地执行一遍。
+
+  问题分析
+我们还是看备库上的 slave 状态：
+[5.6.14-log instance1 root@test1 /root root@127.0.0.1:test 17:42:32 ]
+>show slave status\G
+*************************** 1. row ***************************
+               Slave_IO_State: Waiting for master to send event
+                  Master_Host: 192.168.1.152
+                  Master_User: repl
+                  Master_Port: 9309
+                Connect_Retry: 60
+              Master_Log_File: mysql-bin.000001
+          Read_Master_Log_Pos: 10328743
+               Relay_Log_File: mysql-relay-bin.000002
+                Relay_Log_Pos: 7805047
+        Relay_Master_Log_File: mysql-bin.000001
+              Slave_IO_Running: Yes
+            Slave_SQL_Running: Yes
+              Replicate_Do_DB:
+          Replicate_Ignore_DB:
+           Replicate_Do_Table:
+       Replicate_Ignore_Table:
+      Replicate_Wild_Do_Table:
+  Replicate_Wild_Ignore_Table:
+                   Last_Errno: 0
+                   Last_Error:
+                 Skip_Counter: 0
+          Exec_Master_Log_Pos: 10328743
+              Relay_Log_Space: 7805251
+              Until_Condition: None
+               Until_Log_File:
+                Until_Log_Pos: 0
+           Master_SSL_Allowed: No
+           Master_SSL_CA_File:
+           Master_SSL_CA_Path:
+              Master_SSL_Cert:
+            Master_SSL_Cipher:
+               Master_SSL_Key:
+         Seconds_Behind_Master: 0
+Master_SSL_Verify_Server_Cert: No
+                Last_IO_Errno: 0
+                Last_IO_Error:
+               Last_SQL_Errno: 0
+               Last_SQL_Error:
+  Replicate_Ignore_Server_Ids:
+             Master_Server_Id: 152
+                  Master_UUID: 9300dd57-51da-11e3-989d-3cd92bee36a8
+             Master_Info_File: mysql.slave_master_info
+                    SQL_Delay: 0
+          SQL_Remaining_Delay: NULL
+      Slave_SQL_Running_State: Slave has read all relay log; waiting for the slave I/O thread to update it
+           Master_Retry_Count: 86400
+                  Master_Bind:
+      Last_IO_Error_Timestamp:
+     Last_SQL_Error_Timestamp:
+               Master_SSL_Crl:
+           Master_SSL_Crlpath:
+            Retrieved_Gtid_Set: 9300dd57-51da-11e3-989d-3cd92bee36a8:1-1986
+            Executed_Gtid_Set: 9300dd57-51da-11e3-989d-3cd92bee36a8: 1 - 28123
+                Auto_Position: 0
+1 row in set (0.00 sec)
+我们注意到 Retrieved_Gtid_Set 比 Executed_Gtid_Set 还要少。 Retrieved_Gtid_Set 记录的是 IO thread 从主库拿到的事务集合， Executed_Gtid_Set 记录的是本机已经执行的事务集合。这里有一个很奇怪的想象，本机已经执行的事务集合比 IO thread 从主库拿到的事务集合还要大，而且它只是备库。
+回想一下，我们之前做的操作：手工删除了 binlog 日志和 binlog index 文件，然后启动了 MySQL 。这个操作在没有启动 GTID 的 MySQL 上，我们也做过类似的事情，备库并没有复制丢失的问题。
+这里之所以数据丢失的原因就很清晰了：
+我们手工删除了 binlog 以后，数据库会自动生成 binlog 。但是在 Master 中，它重新从 9300dd57-51da-11e3-989d-3cd92bee36a8:1 第一个事务开始计数。从另外一个侧面来说，已经执行完的 GTID 集合， MySQL 并没有单独保存，而是通过 Binlog 来获得的。
+备库已经执行完了 9300dd57-51da-11e3-989d-3cd92bee36a8 :1 - 28123 这些事务。所以当 SQL thread 拿到从主库复制过来的变更事务时，发现这些事务都是它已经执行过的事务，那么它就不会再重复执行，从而导致对应的这些事务都会被丢失掉。
+从上面来说，我们尽量不要在数据库之外去做一些事情。删除 binlog ，我们其实可以用更好的办法：“ purge master logs ”。如果在某种情况下，我们确实需要在手工删除，并启动数据库，建议同时将 auto.cnf 清理掉。这样主库会生成新的 UUID ，备库发现是新的事务就会执行这个变更了。
