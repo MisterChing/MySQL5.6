@@ -1,0 +1,273 @@
+我们在管理数据库和系统的时候，经常需要做rm 删除文件的操作。由于Linux是没有回收站的，rm删除了文件或者目录以后，数据是无法从Windows所谓的回收站中找到并恢复的。这样的话，数据被误删除了以后，想要恢复我们一般需要从备份中，或者找数据恢复公司来恢复数据。但是，在某些比较特殊的情况下，使用了以下方法，我们还是可以找回部分数据的。
+这里我们主要介绍两种数据恢复的方法。第一种是针对文件在文件系统中已经被删除了，但是，打开这个文件的进程还存在。第二种针对文件在文件系统中已经被删除了，目前也没有任何进程打开着这个文件，但是文件在删除以后没有其他对文件系统的变更操作。
+ 
+1.           从/proc文件系统恢复数据
+在Linux系统中，文件被删除了，只要打开文件的进程没有被关闭，那么恭喜你，这个文件重新恢复出来的可能性非常大。因为Linux操作系统在删除文件时，会判断打开这个文件的所有进程是否都已经关闭，如果还有一个进程没有关闭，那么这个文件的空间将不会释放。只有所有打开这个文件的进程都关闭以后，这个文件的空间才会释放。这也是为什么在Linux下有时候我们删除文件，文件的空间无法释放掉的原因。
+这种情况下，我们可以尝试从/proc文件系统中将文件恢复出来。
+/proc 文件系统是一种内核和内核模块用来向进程 (process) 发送信息的机制 (所以叫做 /proc)。通过这个伪文件系统让你可以和内核内部数据结构进行交互。你可以获取对应进程的有用信息，在运行中 (on the fly) 通过改变内核参数修改部分设置。它与其他文件系统不同，/proc 是存在于内存之中而不是硬盘上。
+接下来我们模拟一下数据误删除的过程，来看看在进程没有关闭的情况下，怎么从/proc中恢复数据。
+首先，我们有一个echo_red.sh的文件，我们在会话session 1查看一下这个文件的内容。
+此时，在另外一个会话session 2中有一个进程在修改这个文件：
+然后这个文件在会话session 1中被我们“误删除”掉了：
+ 
+Session 1
+Session 2
+[root@test1 /home/woqu]
+#ll
+总用量 4
+-rw-r--r-- 1 root 93 10月 16 17:49 echo_red.sh
+ 
+[root@test1 /home/woqu]
+#cat echo_red.sh
+echo_red()
+{
+    # echo a message with red color
+    echo -e "\e[1;31m$@\e[m"
+    return 0
+}
+ 
+ 
+ 
+[root@test1 /home/woqu]
+#cat >echo_red.sh
+echo_red()
+{
+    # echo a message with red color
+    echo -e "\e[1;31m$@\e[m"
+    return 0
+}
+ 
+[root@test1 /home/woqu]
+#rm -f echo_red.sh
+ 
+[root@test1 /home/woqu]
+#ll
+总用量 0
+ 
+ 
+ 
+此时，我们发现文件被“误删除”了，需要恢复数据，那么我们需要怎么做列？
+l   磁盘备份
+发现误删除以后，我们需要立刻停止对该分区的写操作。
+在恢复之前，如果可能的话，建议通过dd命令将磁盘整个备份起来，以避免操作的时候损坏了磁盘上相关数据。
+ 
+l   确定进程号和文件句柄号
+首先，我们需要确定打开这个文件的进程号，以及进程打开这个文件的文件号。最直接的办法就是lsof |grep -i delete：
+[root@test1 /home/woqu]
+#lsof |grep -i delete
+cat       11791  root    1w      REG              253,0       94    1048589 /home/woqu/echo_red.sh (deleted)
+这里一共有9列，各列列名如下：
+COMMAND     PID  USER   FD      TYPE             DEVICE SIZE/OFF       NODE NAME
+也就是说，打开这个文件的进程是11791，而/home/woqu/echo_red.sh对应该进程的文件句柄是1w。也就是说文件句柄号是1。
+l   恢复误删除文件
+然后，我们就可以直接将这个文件的内容拷贝出来：
+ [root@test1 /root]
+#cp /proc/11791/fd/1 echo_red.sh
+ 
+[root@test1 /root]
+#cat echo_red.sh
+echo_red()
+{
+    # echo a message with red color
+    echo -e "\e[1;31m$@\e[m"
+    return 0
+}
+如上所示，数据文件恢复出来了，内容也是一模一样的。
+ 
+2.           Extundelete工具恢复
+对于使用ext3,ext4文件系统的Linux系统有一个比较好的工具可以用于数据恢复，那就是extundelete。当然其他的文件系统当然也有类似的恢复工具。
+由于大部分Linux发行版都是以ext3，ext4作为默认文件系统的，我们这里以extundelete为例演示数据删除以后恢复的相关步骤。
+老规矩，首先我们需要制造一个“误删除”的现场。
+现在我们的/home/mysql下有多个目录，其中一个目录为script：
+[root@test1 /home/mysql]
+#ll
+total 28
+drwxr-xr-x 2 mysql 4096 Jul 21 14:42 bin
+drwxr-xr-x 2 mysql 4096 Oct 12 17:52 conf
+drwxr-xr-x 3 mysql 4096 Sep 26 14:57 data
+drwxr-xr-x 4 mysql 4096 Oct 16 15:24 program
+drwxr-xr-x 2 root  4096 Oct 16 18:16 script
+drwxr-xr-x 4 mysql 4096 Oct 16 15:25 source
+drwxr-xr-x 7 mysql 4096 May 31 11:27 thirdparty
+这个script目录下有一些文件，如下：
+[root@test1 /home/mysql]
+#tree script/
+script/
+├── get_mysql_fdflag.sh
+├── mysqlreport.sh
+└── test_o_direct.c
+由于某种原因，/home/mysql/script被误删除了。
+[root@test1 /home/mysql]
+#rm -fr script/
+ 
+l   磁盘备份
+发现误删除以后，我们需要立刻停止对该分区的写操作，避免inode被重用。
+接下来就需要用extundelete工具对它进行恢复。在恢复之前如果可能的话，建议通过dd命令将磁盘整个备份起来，以避免操作的时候损坏了磁盘上相关数据。万一extundelete或者类似的工具无法恢复数据，这些数据交给专业的硬盘恢复公司也更容易找回数据一些。
+ 
+l   umount分区
+做完了备份，我们首先做的第一步，需要将误删除数据的磁盘分区首先umount掉，这也是避免该分区的数据被损坏的一个步骤。在我们的模拟环境，我们需要：
+[root@test1 /root]
+#umount /home/
+ 
+l   安装extundelete
+如果你机器上并没有安装extundelete的话，首先，你需要把这个工具安装好。目前最新的extundelete版本是0.2.4，安装方法如下：
+yum -y install e2fsprogs*
+wget  http://nchc.dl.sourceforge.net/project/extundelete/extundelete/0.2.4/extundelete-0.2.4.tar.bz2
+tar xjf extundelete-0.2.4.tar.bz2
+cd extundelete-0.2.4/
+./configure
+make
+make install
+ 
+l   查找误删除文件
+通过extundelete可以查看哪些文件被删除了。在我们的模拟场景下，可以这样使用extundelete --inode 2 /dev/VolGroup/home查看/home分区下各个文件和目录的详细信息。这里/dev/VolGroup/home指的是/home对应的分区。对于ext系列的文件系统，编号为2的inode中包含了该分区下的各个文件和目录信息。输出信息如下：
+[root@test1 /root]
+#extundelete --inode 2 /dev/VolGroup/home
+NOTICE: Extended attributes are not restored.
+Loading filesystem metadata ... 400 groups loaded.
+Group: 0
+Contents of inode 2:
+0000 | ed 41 00 00 00 10 00 00 87 99 5e 52 87 99 5e 52 | .A........^R..^R
+0010 | 87 99 5e 52 00 00 00 00 00 00 05 00 08 00 00 00 | ..^R............
+0020 | 00 00 00 00 05 00 00 00 21 24 00 00 00 00 00 00 | ........!$......
+0030 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+0040 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+0050 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+0060 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+0070 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+0080 | 1c 00 00 00 74 63 29 04 74 63 29 04 b8 23 27 8a | ....tc).tc)..#'.
+0090 | e0 3e 2d 52 00 00 00 00 00 00 00 00 00 00 02 ea | .>-R............
+00a0 | 07 06 3c 00 00 00 00 00 21 00 00 00 00 00 00 00 | ..<.....!.......
+00b0 | 73 65 6c 69 6e 75 78 00 00 00 00 00 00 00 00 00 | selinux.........
+00c0 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+00d0 | 00 00 00 00 00 00 00 00 00 00 00 00 73 79 73 74 | ............syst
+00e0 | 65 6d 5f 75 3a 6f 62 6a 65 63 74 5f 72 3a 68 6f | em_u:object_r:ho
+00f0 | 6d 65 5f 72 6f 6f 74 5f 74 3a 73 30 00 00 00 00 | me_root_t:s0....
+ 
+Inode is Allocated
+File mode: 16877
+Low 16 bits of Owner Uid: 0
+Size in bytes: 4096
+Access time: 1381931399
+Creation time: 1381931399
+Modification time: 1381931399
+Deletion Time: 0
+Low 16 bits of Group Id: 0
+Links count: 5
+Blocks count: 8
+File flags: 0
+File version (for NFS): 0
+File ACL: 0
+Directory ACL: 0
+Fragment address: 0
+Direct blocks: 9249, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+Indirect block: 0
+Double indirect block: 0
+Triple indirect block: 0
+ 
+File name                                       | Inode number | Deleted status
+.                                                 2
+..                                                2
+lost+found                                        11
+mysql                                             262145
+cdrom.repo                                        12
+woqu                                              2883585
+我们这里最关心的还是mysql目录的信息。这里我们知道mysql的Inode为262145。于是我们可以再次用extundelete --inode 来查看mysql目录的详细信息：
+[root@test1 /root]
+#extundelete --inode 262145 /dev/VolGroup/home
+NOTICE: Extended attributes are not restored.
+Loading filesystem metadata ... 400 groups loaded.
+Group: 32
+Contents of inode 262145:
+0000 | c0 41 59 02 00 10 00 00 71 9a 5e 52 a8 99 5e 52 | .AY.....q.^R..^R
+0010 | a8 99 5e 52 00 00 00 00 59 02 0c 00 08 00 00 00 | ..^R....Y.......
+0020 | 00 00 08 00 54 00 00 00 0a f3 01 00 04 00 00 00 | ....T...........
+0030 | 00 00 00 00 00 00 00 00 01 00 00 00 20 20 10 00 | ............  ..
+0040 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+0050 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+0060 | 00 00 00 00 fc 9e be d7 00 00 00 00 00 00 00 00 | ................
+0070 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+0080 | 1c 00 00 00 98 8a f7 bb 98 8a f7 bb 84 eb 44 c0 | ..............D.
+0090 | ae be 3e 52 b4 1d 94 e3 00 00 00 00 00 00 00 00 | ..>R............
+00a0 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+00b0 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+00c0 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+00d0 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+00e0 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+00f0 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
+ 
+Inode is Allocated
+File mode: 16832
+Low 16 bits of Owner Uid: 601
+Size in bytes: 4096
+Access time: 1381931633
+Creation time: 1381931432
+Modification time: 1381931432
+Deletion Time: 0
+Low 16 bits of Group Id: 601
+Links count: 12
+Blocks count: 8
+File flags: 524288
+File version (for NFS): 3619593980
+File ACL: 0
+Directory ACL: 0
+Fragment address: 0
+Direct blocks: 127754, 4, 0, 0, 1, 1056800, 0, 0, 0, 0, 0, 0
+Indirect block: 0
+Double indirect block: 0
+Triple indirect block: 0
+ 
+File name                                       | Inode number | Deleted status
+.                                                 262145
+..                                                2
+.mozilla                                          262146
+.bash_profile                                     262152
+.gnome2                                           262150
+.emacs                                            262195
+.bash_logout                                      262194
+.bashrc                                           262149
+bin                                               262154
+conf                                              262155
+data                                              262156
+script                                            404044     Deleted
+thirdparty                                        262158
+program                                           264107
+.viminfo                                          262765
+.bash_history                                     262193
+.bzr.log                                          262153
+.mysql_history                                    273588
+source                                            402793
+.ssh                                              414601
+这里我们误删除的script目录在这里被标记为Deleted状态了。
+ 
+l   恢复误删除数据
+extundelete可以通过--restore-inode将指定inode对应的文件恢复出来，也可以使用--restore-all将所有状态为已经Deleted的文件和目录恢复回来。restore-inode主要用于恢复单个文件；restore-all用于恢复所有的文件目录。另外，还有--restore-file，--restore-files，--restore-directory来恢复指定目录或者文件。
+另外，如果你知道删除的时间，那么可以指定--after或者--before来指定误删除的时间。
+恢复数据的时候，extundelete将在当前目录下新建RECOVERED_FILES文件夹，并把恢复出来的数据文件或者目录存放在该目录中。
+比如，我们使用--restore-inode恢复数据，恢复264111号inode文件如下：
+[root@test1 /root/RECOVERED_FILES]
+#extundelete --restore-inode 264111 /dev/VolGroup/home
+NOTICE: Extended attributes are not restored.
+Loading filesystem metadata ... 400 groups loaded.
+Loading journal descriptors ... 31810 descriptors loaded.
+ 
+[root@test1 /root/RECOVERED_FILES]
+#ll file. 264111
+-rw-r--r-- 1 root 43816 10月 16 15:42 file.264111
+如上，它恢复出来的文件会被重命名为file.$Inode_no(这里是file.264111)放在RECOVERED_FILES目录中。需要完全恢复数据的话，只需要将文件拷贝回原目录，并重命名。
+ 
+使用restore-all恢复的话，目录名和文件名都会恢复回来，你可以在当前目录的RECOVERED_FILES目录下找到对应的文件和目录如下：
+[root@test1 /root/RECOVERED_FILES]
+#ll mysql/
+total 16
+drwxr-xr-x 4 root 4096 Oct 16 15:42 script
+你只需要将script拷贝到原目录就好了。
+ 
+3.           终极解决方案
+当然，以上的两个方法都是万不得已才使用的。最好的DBA和SA永远不是四处奔忙的救火队员。最好的办法是先做好预防工作，在发生之前尽量保证不出问题，而rm误删除文件的预防就是对重要数据进行备份以及rm -i。
+alias rm=’rm -i --’
+做了别名以后，删除数据的时候，rm命令就会提示你，文件是否确定要删除：
+[root@test1 /root/RECOVERED_FILES/mysql/script]
+#rm sock
+rm：是否删除普通文件 "sock"？
+其他避免误删除等故障的方法可以参考《远离故障的十大原则》。当然，最重要的还是日常对这种不可逆操作的谨慎和小心，并及时做好备份。
