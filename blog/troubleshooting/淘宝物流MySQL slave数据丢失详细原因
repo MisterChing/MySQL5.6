@@ -1,0 +1,190 @@
+前两天，惊闻淘宝发生了一个非常狗血的事情，备库复制状态一切正常，但是备库的数据DDL可以复制过去，DML都丢失了。导致数据库数据不一致。这样的话，就算你有slave监控，也发现不了主备数据延迟和不一致的问题。
+
+最后淘宝希羽定位到了问题，并提出了解决方案。参考http://hickey.in/?p=146。不过具体原因和为什么会发生这个问题并没有说的那么详细。沃趣科技特别针对这个问题做了深入详细的研究，整理出来，以飨观众。
+
+首先我们需要跟大家解释一下MySQL复制的基本原理。
+
+主库为每一个slave开启一个binlog dump线程，用于把本机记录下所有的变更，发送给备库；备库使用io thread线程接收数据存入relay log中；然后由sql thread线程从relay log中读出来应用到本地。这个是大家都熟知的。我们不详细介绍。但是slave是怎么注册上主库，主库是怎么通知各个binlog dump线程，binlog dump和io thread线程怎么通讯，io thread怎么重连，relay log怎么读取二进制数据翻译成对应的信息应用在slave上；我们就不得而知了。而问题就发生在最后“relay log怎么读取二进制数据翻译成对应的信息应用在slave上”
+
+binlog是二进制数据，必须用mysqlbinlog工具才能打开。所以我们有必要先介绍一下binlog的格式。也就是insert，update，delete等这些数据是怎么以二进制形式记录到binlog文件中去的。binlog文件是按照event来组织的。每个文件前4个字节是fe 62 69 6e，接下来就是各个event了。event有很多种类型。列出如下：
+
+enum Log_event_type {
+  UNKNOWN_EVENT= 0,
+  START_EVENT_V3= 1,
+  QUERY_EVENT= 2,
+  STOP_EVENT= 3,
+  ROTATE_EVENT= 4,
+  INTVAR_EVENT= 5,
+  LOAD_EVENT= 6,
+  SLAVE_EVENT= 7,
+  CREATE_FILE_EVENT= 8,
+  APPEND_BLOCK_EVENT= 9,
+  EXEC_LOAD_EVENT= 10,
+  DELETE_FILE_EVENT= 11,
+  NEW_LOAD_EVENT= 12,
+  RAND_EVENT= 13,
+  USER_VAR_EVENT= 14,
+  FORMAT_DESCRIPTION_EVENT= 15,
+  XID_EVENT= 16,
+  BEGIN_LOAD_QUERY_EVENT= 17,
+  EXECUTE_LOAD_QUERY_EVENT= 18,
+  TABLE_MAP_EVENT = 19,
+  PRE_GA_WRITE_ROWS_EVENT = 20,
+  PRE_GA_UPDATE_ROWS_EVENT = 21,
+  PRE_GA_DELETE_ROWS_EVENT = 22,
+  WRITE_ROWS_EVENT = 23,
+  UPDATE_ROWS_EVENT = 24,
+  DELETE_ROWS_EVENT = 25,
+  INCIDENT_EVENT= 26,
+  HEARTBEAT_LOG_EVENT= 27,
+  ENUM_END_EVENT
+  /* end marker */
+};
+比如ROTATE_EVENT对应的记录了binlog切换到下一个binlog文件的信息，XID_EVENT记录了一个事务提交的相关信息。Binlog_format可以设置为STATEMENT和ROW的方式。当设置为STATEMENT情况下，DML会记录为原始的SQL，也就是记录在QUERY_EVENT中。而ROW会记录为TABLE_MAP_EVENT+ROW_LOG_EVENT（包括WRITE_ROWS_EVENT，UPDATE_ROWS_EVENT，DELETE_ROWS_EVENT）。使用mysqlbinlog可以看看他们的区别。
+
+STATEMENT方式下，记录为QUERY_EVENT如下图：
+
+statement_event
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ROW方式下，update一条记录如下：
+
+row_simple
+
+ 
+
+ 
+
+ 
+
+ 
+
+这样的话我们就无法看到它到底update了什么数据，使用mysqlbinlog -vvv可以让它更详细的翻译给我看：
+
+row_vvv
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+淘宝采用的是ROW方式，有两个好处：第一：更容易解析，DRC或者mysql transfer等淘宝系数据库迁移工具可以精确的解析出数据，进行同步；第二：可以有效避免rand(),uuid()等由于主备环境不一致而导致的问题。
+
+这里还有一个地方需要解释一下，为什么一个update在ROW模式下需要分解成两个event：一个Table_map，一个Update_rows。我们想象一下，一个update如果更新了10000条数据，那么对应的表结构信息是否需要记录10000次列，其实是对同一个表的操作，所以这里binlog只是记录了一个Table_map用于记录表结构相关信息，而后面的Update_rows记录了更新数据的行信息。他们之间是通过table_id来联系的。
+
+淘宝的问题也就出现在这里，这两个事件是通过table_id来联系的，table_id是ulong类型的。刚好这个联系在淘宝的这个环境下就断了。具体的细节要牵涉到部分源码。对源码不感兴趣的同学可以直接跳过这一段：
+
+首先，我们了解一下记录表定义信息的数据结构。它对应的class是Table_map_log_event（对应源码sql/log_event.cc），它保存了本次DML操作对应的：table_id，数据库名，表名，字段数，字段类型等。对应的这些信息都是保存在一个table_mapping的hash数据结构中（sql/rpl_tblmap.cc中）。hash的key就是table_id，hash的值就是TABLE*的数据结构(包含了表的各种信息，包括数据库名，表名，字段数，字段类型等)，通过set_table()方法来hash，通过get_table()方法来根据table_id获得对应的表信息。这里table_id是ulong型的。
+
+然后我们了解一下存储变更的具体数据的数据结构。update行的Update_row event对应的class是Update_rows_log_event（对应源码sql/log_event.cc），基类是Rows_log_event(之类分别有：Write_rows_log_event，Update_rows_log_event，Delete_rows_log_event与insert, update, delete一一对应)。一个Row_log_event对应一行数据的变更(插入，更新，删除)，它记录的信息包括table_id，哪些字段为空的bitmap，各个字段的具体数据等。这里table_id是ulong型的。
+
+所有的binlog event有一个公共的父类Log_event(对应源码sql/log_event.h)，每一个log_event都是通过do_apply_event()方法来将event应用到本地数据库去。
+
+另外，我们必须要介绍一下RPL_TABLE_LIST结构(对应源码sql/rpl_utility.h)，它的父类TABLE_LIST(对应源码：sql/table.h)中定义table_id为：
+
+  uint          table_id; /* table id (from binlog) for opened table */   //这里就是最终需要bug fix的地方
+
+这里定义为uint和其他地方定义为ulong不一样！
+
+这里就是最终需要bug fix的地方。问题的原因我们还要继续看。这个RPL_TABLE_LIST是包含在Relay_log_info结构(对应源码sql/rpl_mi.h)中的，它记录了这次变更需要lock的多个表信息。
+
+ 
+
+前面提过，每一个event都有一个do_apply_event()方法用于将event应用到本地数据库中去。int Table_map_log_event::do_apply_event(Relay_log_info const *rli)方法(对应源码sql/log_event.cc)中就将ulong型的m_table_id赋值给uint型的table_list->table_id，而table_list作为tables_to_lock存入了公共变量rli中。
+
+table_list->table_id= DBUG_EVALUATE_IF(“inject_tblmap_same_id_maps_diff_table”, 0, m_table_id);
+
+…
+
+/*
+We record in the slave’s information that the table should be
+locked by linking the table into the list of tables to lock.
+*/
+table_list->next_global= table_list->next_local= rli->tables_to_lock;
+const_cast<Relay_log_info*>(rli)->tables_to_lock= table_list;
+const_cast<Relay_log_info*>(rli)->tables_to_lock_count++;
+/* ‘memory’ is freed in clear_tables_to_lock */
+
+Row_log_event类的int Rows_log_event::do_apply_event(Relay_log_info const *rli)方法(对应源码sql/log_event.cc)中：
+
+TABLE_LIST *ptr= rli->tables_to_lock;
+for (uint i=0 ; ptr && (i < rli->tables_to_lock_count); ptr= ptr->next_global, i++)
+const_cast<Relay_log_info*>(rli)->m_table_map.set_table(ptr->table_id, ptr->table);
+
+利用记录在rli(Relay_log_info结构)中的tables_to_lock获得table_list(RPL_TABLE_LIST结构)，而这个结构里面的是已经被截断的uint型的table_id。
+
+当需要对具体的表进行row变更的时候在同样的int Rows_log_event::do_apply_event(Relay_log_info const *rli)方法(对应源码sql/log_event.cc)中：
+
+TABLE*
+table=
+m_table= const_cast<Relay_log_info*>(rli)->m_table_map.get_table(m_table_id);
+
+DBUG_PRINT(“debug”, (“m_table: 0x%lx, m_table_id: %lu”, (ulong) m_table, m_table_id));
+
+通过ulong型的值去获得hash表中获得表结构信息就无法获取了。也就是说，之前用uint型的ptr->table_id构建出来的key，value的hash对，用ulong型的m_table_id是无法查询到的。
+
+图示如下：
+
+tableid_bug
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+为了举例简单，假设uint 4 bit ulong 8bit，ulong的11111111被存到了uint型的数据中(假设被截断为00001111)，并存到hash表中去了，那么对应的ulong型的key去查数据时，插到的表定义肯定就是NULL了。这样的话，表结构找不到，备机也就无法同步主库的任何DML数据，也就是淘宝物流库备机与主机不一致的原因了。
+
+ 
+
+那么是什么原因导致的这个问题列。淘宝是因为它的table cache设置过小，table_definition_cache为256，table_open_cache为512，而该实例上由于分库分表，表一共有4301个，table cache严重不足。这里很多人对table_id有误解，认为table_id是跟表一起走的，是固定的。其实table_id是表载入table cache时临时分配的，一个不断增长的变量。当table cache不足，flush table又非常多的时候，这个table_id增长的速率非常快，达到uint的上限时，2的32次方以后，就触发了这个bug，导致主备不一致。广大的MySQL使用者都留意一下，你的table_id是不是也非常大了，超过2的32次方，那么你的备机就重搭吧。
+
+解决方案：
+
+1、自己打patch，重编译并替换线上MySQL
+
+2、增加table cache 大小。
+
+3、重启主库让table_id归零。
+
+ 
+
+参考：
+
+http://hickey.in/?p=146
+
+http://hatemysql.com/2011/12/14/mysql-show-slave-status/
+
+http://dev.mysql.com/doc/internals/en/binary-log.html
