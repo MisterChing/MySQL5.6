@@ -1,0 +1,115 @@
+之前写了一篇文章以为对MVCC的大致原理有些了解了。今天看了《高性能MySQL》的时候，深究了一下read view的问题，发现还是蛮有意思的。
+
+ 
+
+特别画了一张图来确认一下。
+
+本文是上一篇MySQL事务和MVCC简介的后续，建议先了解上一篇文章以后再阅读本文。
+
+上一篇文章简单描述了MVCC的相关情况，但是没有详细说，read view是什么结构，并且它到底是怎么工作的。
+
+比如，我们在show engine innodb status可以看到如下内容：
+
+  —TRANSACTION 0 600, ACTIVE 4 sec, process no 3396, OS thread id 1148250464, thread declared inside InnoDB 442
+  mysql tables in use 1, locked 0
+  MySQL thread id 8079, query id 728899 localhost baron Sending data
+  select sql_calc_found_rows * from b limit 5
+  Trx read view will not see trx with id>= 0 601, sees <0 596
+要理解这个，我们首先要知道：
+
+read view其实就是一个保存事务ID的list列表。记录的是本事务执行时，MySQL还有哪些事务在执行。
+
+Read Repeatable(下文和图中用RR表示)对应的是在每个事务启动的时候创建 一个Read View。
+
+Read Commit(下文和图中用RC表示)对应的是每次执行SQL statement时候创建 一个Read View。
+
+ 
+
+根据show engine innodb status的输出是说看到这个事务的id是600。
+
+对这个事务来说，trx id为596以下的所有事务修改的行数据，这个事务都可以看到，
+
+trx id在601以上的事务修改的数据，这个事务都不应该读取到。
+
+596到601号事务，一共5个事务修改的数据无法确定是否能够读取。read view应该为这5个事务id集合的子集。
+
+ 
+
+如果线程的隔离级别是RR:
+
+按照show engine innodb status的输出，600号事务在事务启动的时候，MySQL告诉它：
+
+596之前的所有事务都已经提交了(Trx read view will not see trx with id>= 0 601, sees <0 596)，
+
+由于事务本身是600号，那么对应的601号事务因为是在它后面启动的，600号事务肯定无法提供读取到数据(Trx read view will not see trx with id>= 0 601, sees <0 596)。
+
+read view表示的是事务开始时MySQL还有哪些事务在执行，就应该为{596,597,598,599}集合的子集，假设为{596，598}，
+
+根据read view，Innodb在读取数据的时候需要判断该行数据的修改事务号，判断的方法为：
+
+a) 如果行数据的修改事务号小于596，由于在事务启动的时候596之前的所有线程都已经提交了，那么该行数据可读。
+
+b) 如果行数据的修改事务号大于601,那么该行数据肯定不可读。如果事务号为600(即自己)，本事务未提交，当然也是不可读的。
+
+为了保证在事务内任何时间读取的数据都是一致的，需要根据行数据的undo信息回溯，每次回溯都需要进行a),b),c),d)的判断，直到找到一个可读的数据。
+
+c) 如果行数据的修改事务号在read view里面{596，599}，说明是该事务(600号)开始时没有提交的数据修改，
+
+为了保证在事务内任何时间读取的数据都是一致的，需要根据行数据的undo信息回溯，每次回溯都需要进行a),b),c),d)的判断，直到找到一个可读的数据。
+
+d)如果不在read view里面，即事务id号在{597,598}中，说明修改行数据是该事务(600号)开始时已经提交的数据修改，那么该行数据可读。
+
+mvcc_readview
+
+图1 MySQL read view 示意图
+
+如图1。这个事务的行修改数据在{[0~595],597,598}是可读区间，{596,599,600,[601~ +infinity]}是不可读区间。
+
+ 
+
+ 
+
+如果线程的隔离级别是RC，线程开始的时候，RC事务并不会做read view，此时开始的SQL跟上面RR的情况可能是一样的。
+
+但是过了一段时间如果601事务提交了，同样的查询，在RC下面提交，对应的show engine innodb status的信息可能稍微有点不同：
+
+  —TRANSACTION 0 600, ACTIVE 4 sec, process no 3396, OS thread id 1148250464, thread declared inside InnoDB 442
+  mysql tables in use 1, locked 0
+  MySQL thread id 8079, query id 728899 localhost baron Sending data
+  select sql_calc_found_rows * from b limit 5
+  Trx read view will not see trx with id>= 0 602, sees <0 596
+按照输出，600号事务在语句“select sql_calc_found_rows * from b limit 5”发起的时候，MySQL告诉它：
+
+596之前的所有事务都已经提交了(Trx read view will not see trx with id>= 0 601, sees <0 596)，
+
+对应的，602号线程以及它之后的所有线程都还未提交(Trx read view will not see trx with id>= 0 602, sees <0 596)。
+
+read view表示的是语句开始时MySQL还有哪些事务在执行(注意，这里跟RR为事务开始的时候的read view不同了)，
+
+在一个事务里面，每个SQL执行的时候，它的read view都可能是不同的。有可能事务启动的时候的sql的read view为{596，598}，
+
+这个语句执行的时候，601事务提交了，read view为{596，598}。
+
+注意，601号事务虽然在600事务后启动，此时已经提交了行数据修改，它修改的数据，600号线程也可以读到。
+
+根据read view，InnoDB在读取数据的时候需要判断该行数据的修改事务号，判断的方法为：
+
+a) 如果行数据的修改事务号小于596，由于在语句启动的时候596之前的所有线程都已经提交了，那么该行数据可读。
+
+b) 如果行数据的修改事务号大于等于602,那么该行数据肯定不可读。如果事务号为600(即自己)，本事务未提交，当然也是不可读的。
+
+为了保证读到的是Commited的数据，需要根据行数据的undo信息回溯，每次回溯都需要进行a),b),c),d)的判断，直到找到一个可读的数据。
+
+c) 如果行数据的修改事务号在read view里面{596，599}，说明是该语句开始时没有提交的数据修改，
+
+为了保证读到的是Commited的数据，需要根据行数据的undo信息回溯，每次回溯都需要进行a),b),c),d)的判断，直到找到一个可读的数据。
+
+d)如果不在read view里面，即事务id号在{597,598}中，说明修改行数据是该语句开始时已经提交的数据修改，那么该行数据可读。
+
+ 
+
+如图1。这个语句的修改行数据的事务id在{[0~595],597,598,601}是可读区间，{596,599,600,[602~ +infinity]}是不可读区间。
+
+ 
+
+整体来说，这篇文章描述了在Read Readrepeatable和Read Commit环境下，MySQL根据Read View读取数据的方法，来保证可重复读和只读到已经提交的数据。
