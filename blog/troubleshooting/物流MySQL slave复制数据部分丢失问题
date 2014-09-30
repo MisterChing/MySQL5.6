@@ -1,0 +1,175 @@
+现象：
+主备复制，slave status一切正常，但部分数据丢失，即没有复制到备库上。
+
+初步排查：
+初步看，只有DDL才能被复制到备库，而DML则在备库上查不到。看了如下两点：
+1. 看relay log中是否有对应 的event。
+2. 看有没有过滤规则。
+
+1和2属于明显的配置相关的异常，很快就能排除掉。
+没有什么思路，在备库上GDB，查看slave sql线程到底出错在什么地方。
+
+GDB排查：
+GDB跟踪备库：
+gdb attach到mysqld上会遇到无法找到src的问题：
+/home/jiyuan/rpmbuild/BUILD/tb-mysql-5.5.18/sql/slave.cc: No such file or directory.
+解决方法：substitute-path命令重新指定下搜索目录
+set substitute-path  /home/jiyuan/rpmbuild/BUILD/tb-mysql-5.5.18 /home/mysql/Percona-Server-5.5.18
+问题的本质是由于类型转换导致溢出而引发，详情的分析见 #bug1070255
+
+剩下问题：
+1. 如何解决
+重启主库让table_cache中的table_id清零。但这不现实，因为此时备库已经有数据丢失，无法做切换。所以，还是以预防为主，超过警示区应该考虑升级MySQL。否则，只能人工干预来挽救。
+2. 如何预防
+以下分别是IC和TC上查看的结果：
+up 40 Days  （升级内核）
+
+#121023 18:31:00 server id 1630297  end_log_pos 57091   Table_map: `icdb1`.`xxx` mapped to number 440
+#121023 18:31:00 server id 1630297  end_log_pos 58901   Update_rows: table id 440 flags: STMT_END_F
+
+up ~400 Days
+#121023 18:24:22 server id 1630334  end_log_pos 2694    Table_map: `tc17`.`xxx` mapped to number 274950
+#121023 18:24:22 server id 1630334  end_log_pos 4024    Update_rows: table id 274950 flags: STMT_END_F
+
+table_id值必须限制在max(uint)之内。如果不幸接近，必须打升级打补丁版本，或主动切换，重启老主库，再切换回。
+以下结果显示，重启主库，table_id从零开始。
+
+root@test 06:45:54>show binlog events in ‘my160064-bin.000006′;
++———————+—–+————-+———–+————-+—————————————–+
+| Log_name            | Pos | Event_type  | Server_id | End_log_pos | Info                                    |
++———————+—–+————-+———–+————-+—————————————–+
+| my160064-bin.000006 |   4 | Format_desc |  16162881 |         120 | Server ver: 5.6.7-rc-log, Binlog ver: 4 |
+| my160064-bin.000006 | 120 | Query       |  16162881 |         192 | BEGIN                                   |
+| my160064-bin.000006 | 192 | Table_map   |  16162881 |         240 | table_id: 6313331 (test.xiyu2)          |
+| my160064-bin.000006 | 240 | Write_rows  |  16162881 |         280 | table_id: 6313331 flags: STMT_END_F     |
+| my160064-bin.000006 | 280 | Xid         |  16162881 |         311 | COMMIT /* xid=10499124 */               |
++———————+—–+————-+———–+————-+—————————————–+
+5 rows in set (0.00 sec)
+root@test 06:47:34>show binlog events in ‘my160064-bin.000008′;
++———————+—–+————-+———–+————-+—————————————–+
+| Log_name            | Pos | Event_type  | Server_id | End_log_pos | Info                                    |
++———————+—–+————-+———–+————-+—————————————–+
+| my160064-bin.000008 |   4 | Format_desc |  16162881 |         120 | Server ver: 5.6.7-rc-log, Binlog ver: 4 |
+| my160064-bin.000008 | 120 | Query       |  16162881 |         199 | BEGIN                                   |
+| my160064-bin.000008 | 199 | Query       |  16162881 |         300 | use `test`; insert into xiyu2 values(3) |
+| my160064-bin.000008 | 300 | Xid         |  16162881 |         331 | COMMIT /* xid=10 */                     |
+| my160064-bin.000008 | 331 | Query       |  16162881 |         403 | BEGIN                                   |
+| my160064-bin.000008 | 403 | Table_map   |  16162881 |         451 | table_id: 70 (test.xiyu2)               |
+| my160064-bin.000008 | 451 | Write_rows  |  16162881 |         491 | table_id: 70 flags: STMT_END_F          |
+| my160064-bin.000008 | 491 | Xid         |  16162881 |         522 | COMMIT /* xid=18 */                     |
++———————+—–+————-+———–+————-+—————————————–+
+
+3. 催化剂
+表多，table cache少，或许还有频繁的flush tables。（准确地说，与table_definition_cache更紧密，参考vim -t assign_new_table_id）
+在事发机器上，MySQL自今天6月份开始运行，table数量多，但table cache相对较少：
+root@(none) 06:22:21>show global variables like ‘%_open_%’;
++——————-+——-+
+| Variable_name | Value |
++——————-+——-+
+| have_openssl | NO |
+| innodb_open_files | 60000 |
+| table_open_cache | 512 |
++——————-+——-+
+
+root@(none) 07:47:57>show variables like ‘table_%’;
+
++————————-+——–+
+| Variable_name | Value |
++————————-+——–+
+| table_definition_cache | 256 |
+| table_lock_wait_timeout | 50 |
+| table_open_cache | 512 |
+| table_type | InnoDB |
++————————-+——–+
+4 rows in set (0.00 sec)
+root@information_schema 06:24:16>select * from tables limit 1;
+Ctrl-C — sending “KILL QUERY 22672590″ to server …
+Ctrl-C — query aborted.
+ERROR 1317 (70100): Query execution was interrupted
+root@information_schema 06:24:56>select count(*) from tables limit 1;
++———-+
+| count(*) |
++———-+
+| 4301 |
++———-+
+1 row in set (0.04 sec)
+
+root@information_schema 06:25:10>
+
+4. 重现步骤
+
+执行flush tables，再观察binlog中的table_id的增长。
+
+root@test 01:15:58>show binlog events;
++———————+—–+————-+———–+————-+—————————————–+
+| Log_name            | Pos | Event_type  | Server_id | End_log_pos | Info                                    |
++———————+—–+————-+———–+————-+—————————————–+
+| my160064-bin.000001 |   4 | Format_desc |  16162881 |         120 | Server ver: 5.6.7-rc-log, Binlog ver: 4 |
+| my160064-bin.000001 | 120 | Query       |  16162881 |         192 | BEGIN                                   |
+| my160064-bin.000001 | 192 | Table_map   |  16162881 |         241 | table_id: 6311000 (test.xiyu1)          |
+| my160064-bin.000001 | 241 | Write_rows  |  16162881 |         285 | table_id: 6311000 flags: STMT_END_F     |
+| my160064-bin.000001 | 285 | Table_map   |  16162881 |         333 | table_id: 6311001 (test.xiyu2)          |
+| my160064-bin.000001 | 333 | Write_rows  |  16162881 |         373 | table_id: 6311001 flags: STMT_END_F     |
+| my160064-bin.000001 | 373 | Xid         |  16162881 |         404 | COMMIT /* xid=10416006 */               |
++———————+—–+————-+———–+————-+—————————————–+
+7 rows in set (0.00 sec)
+执行大量DDL，table_id不变：
+| my160064-bin.000001 | 255331 | Query       |  16162881 |      255403 | BEGIN                                                                            |
+| my160064-bin.000001 | 255403 | Table_map   |  16162881 |      255451 | table_id: 6311001 (test.xiyu2)                                                   |
+| my160064-bin.000001 | 255451 | Write_rows  |  16162881 |      255491 | table_id: 6311001 flags: STMT_END_F                                              |
+| my160064-bin.000001 | 255491 | Xid         |  16162881 |      255522 | COMMIT /* xid=10421899 */                                                        |
+flush tables，table_id增1：
+| my160064-bin.000001 | 324505 | Query       |  16162881 |      324577 | BEGIN                                                                            |
+| my160064-bin.000001 | 324577 | Table_map   |  16162881 |      324625 | table_id: 6311002 (test.xiyu2)                                                   |
+| my160064-bin.000001 | 324625 | Write_rows  |  16162881 |      324665 | table_id: 6311002 flags: STMT_END_F                                              |
+| my160064-bin.000001 | 324665 | Xid         |  16162881 |      324696 | COMMIT /* xid=10423485 */
+| my160064-bin.000001 | 654719 | Query       |  16162881 |      654791 | BEGIN                                                                            |
+| my160064-bin.000001 | 654791 | Table_map   |  16162881 |      654840 | table_id: 6311003 (test.xiyu1)                                                   |
+| my160064-bin.000001 | 654840 | Write_rows  |  16162881 |      654884 | table_id: 6311003 flags: STMT_END_F                                              |
+| my160064-bin.000001 | 654884 | Xid         |  16162881 |      654915 | COMMIT /* xid=10431075 */
+
+或
+频繁创建表并插件一条记录，观察binlog中table_id不断增长
+
+root@test 06:53:04>show binlog events in ‘my160064-bin.000009′;
++———————+—–+————-+———–+————-+—————————————–+
+| Log_name            | Pos | Event_type  | Server_id | End_log_pos | Info                                    |
++———————+—–+————-+———–+————-+—————————————–+
+| my160064-bin.000009 |   4 | Format_desc |  16162881 |         120 | Server ver: 5.6.7-rc-log, Binlog ver: 4 |
+| my160064-bin.000009 | 120 | Query       |  16162881 |         192 | BEGIN                                   |
+| my160064-bin.000009 | 192 | Table_map   |  16162881 |         240 | table_id: 70 (test.xiyu2)               |
+| my160064-bin.000009 | 240 | Write_rows  |  16162881 |         280 | table_id: 70 flags: STMT_END_F          |
+| my160064-bin.000009 | 280 | Xid         |  16162881 |         311 | COMMIT /* xid=24 */                     |
++———————+—–+————-+———–+————-+—————————————–+
+
+$ cat load_test.sh
+
+# test DML/DDL for lots of tables
+
+for id in `seq 0 10240`
+do
+tb=`printf “t%05d” $id`
+sql=”drop table $tb;”
+$s4 test -e “$sql”
+sql=”create table $tb (a int primary key, b varchar(20)) engine=innodb;”
+$s4 test -e “$sql”
+
+$s4 test -e “insert into $tb values(1, ‘aaa’);”
+done
+echo “done”
+$ sh  load_test
+done
+
+运行完再观察binlog中的table_id:
+
+root@test 07:06:34>show binlog events in ‘my160064-bin.000010′;
++———————+—–+————-+———–+————-+—————————————–+
+| Log_name            | Pos | Event_type  | Server_id | End_log_pos | Info                                    |
++———————+—–+————-+———–+————-+—————————————–+
+| my160064-bin.000010 |   4 | Format_desc |  16162881 |         120 | Server ver: 5.6.7-rc-log, Binlog ver: 4 |
+| my160064-bin.000010 | 120 | Query       |  16162881 |         192 | BEGIN                                   |
+| my160064-bin.000010 | 192 | Table_map   |  16162881 |         240 | table_id: 10312 (test.xiyu2)            |
+| my160064-bin.000010 | 240 | Write_rows  |  16162881 |         280 | table_id: 10312 flags: STMT_END_F       |
+| my160064-bin.000010 | 280 | Xid         |  16162881 |         311 | COMMIT /* xid=92204 */                  |
++———————+—–+————-+———–+————-+—————————————–+
+5 rows in set (0.00 sec)
