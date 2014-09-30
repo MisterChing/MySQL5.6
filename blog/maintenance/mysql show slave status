@@ -1,0 +1,172 @@
+1. 概览
+2. IO thread, SQL thread状态变更
+3. Master_Log_File，Read_Master_Log_Pos；Relay_Log_File，Relay_Log_Pos；Relay_Master_Log_File，Exec_Master_Log_Pos的具体位置
+4. 参考资料
+
+1. 概览
+  mysql的replication复制可以通过show slave status;
+  我们天天都在用，但是对它的理解却不见的很深，
+  特别把show slave status的每一项都解析一下
+  如下是一个普通的MySQL show slave status的输出：
+  admin@localhost : (none) 05:59:24> show slave status\G
+  *************************** 1. row ***************************
+                 Slave_IO_State: Waiting for master to send event
+                    Master_Host: 172.20.164.67
+                    Master_User: repl
+                    Master_Port: 3306
+                  Connect_Retry: 60
+                Master_Log_File: mysql-bin.001896
+            Read_Master_Log_Pos: 226029100
+                 Relay_Log_File: mysql-relay-bin.002014
+                  Relay_Log_Pos: 87341525
+          Relay_Master_Log_File: mysql-bin.001896
+               Slave_IO_Running: Yes
+              Slave_SQL_Running: Yes
+                Replicate_Do_DB:
+            Replicate_Ignore_DB:
+             Replicate_Do_Table:
+         Replicate_Ignore_Table:
+        Replicate_Wild_Do_Table:
+    Replicate_Wild_Ignore_Table:
+                     Last_Errno: 0
+                     Last_Error:
+                   Skip_Counter: 0
+            Exec_Master_Log_Pos: 226029100
+                Relay_Log_Space: 87341723
+                Until_Condition: None
+                 Until_Log_File:
+                  Until_Log_Pos: 0
+             Master_SSL_Allowed: No
+             Master_SSL_CA_File:
+             Master_SSL_CA_Path:
+                Master_SSL_Cert:
+              Master_SSL_Cipher:
+                 Master_SSL_Key:
+          Seconds_Behind_Master: 0
+  Master_SSL_Verify_Server_Cert: No
+                  Last_IO_Errno: 0
+                  Last_IO_Error:
+                 Last_SQL_Errno: 0
+Last_SQL_Error:
+做了一个列表，简单注释了一下各个字段的意思，如下：
+
+字段名	注释	可能取值	取值示例
+Slave_IO_State	slave状态的文字描述	slave线程状态	Waiting for master to send event
+Master_Host	master的IP或主机名		172.20.164.67
+Master_User	连接master使用的用户名		repl
+Master_Port	连接master使用的密码		3306
+Connect_Retry	重新连接MySQL的重试间隔时间，单位秒		60
+Master_Log_File	IO thread读取到的binlog日志文件	Master_Log_File，Read_Master_Log_Pos；Relay_Log_File，Relay_Log_Pos；Relay_Master_Log_File，Exec_Master_Log_Pos的具体位置	mysql-bin.001896
+Read_Master_Log_Pos	IO thread读取到的binlog日志文件位置		226029100
+Relay_Log_File	slave 在本地缓存的relay 日志的文件名		mysql-relay-bin.002014
+Relay_Log_Pos	slave 在本地缓存的relay 日志的文件位置		87341525
+Relay_Master_Log_File	SQL thread 执行到master的binlog文件名		mysql-bin.001896
+Slave_IO_Running	IO thread是否正常运行		Yes
+Slave_SQL_Running	SQL thread是否正常运行		Yes
+Replicate_Do_DB	slave上需要执行的schema		
+Replicate_Ignore_DB	slave上需要忽略的schema		
+Replicate_Do_Table	slave上需要执行的table		
+Replicate_Ignore_Table	slave上需要忽略的table		
+Replicate_Wild_Do_Table	slave上需要执行的table正则表达式		
+Replicate_Wild_Ignore_Table	slave上需要忽略的table正则表达式		
+Last_Errno	上一次出错的错误号		0
+Last_Error	上一次出错的错误信息		
+Skip_Counter	还剩下的忽略event次数		0
+Exec_Master_Log_Pos	SQL thread 执行到master的binlog文件位置		226029100
+Relay_Log_Space	relay log占用的空间大小		87341723
+Until_Condition	复制until条件，在stop slave,start slave(不带until)或server重启的时候会自动重置		None
+Until_Log_File	复制停止的文件名		
+Until_Log_Pos	复制停止的文件位置		0
+Master_SSL_Allowed	是否使用SSL连接master		No
+Master_SSL_CA_File	ssl agent文件ca-cert.pem的文件名		/etc/mysql/newcerts/ca-cert.pem
+Master_SSL_CA_Path	ssl agent文件ca-cert.pem的路径名		
+Master_SSL_Cert	ssl 授权文件		/etc/mysql/newcerts/client-cert.pem
+Master_SSL_Cipher	ssl 加密算法		
+Master_SSL_Key	ssl 密钥文件		/etc/mysql/newcerts/client-key.pem
+Seconds_Behind_Master	SQL thread相对master的延迟时间		0
+Master_SSL_Verify_Server_Cert	是否检查master的授权文件		No
+Last_IO_Errno	IO thread的上一次出错的错误号		0
+Last_IO_Error	IO thread的上一次出错的错误信息		
+Last_SQL_Errno	SQL thread的上一次出错的错误号		0
+Last_SQL_Error	SQL thread的上一次出错的错误信息		
+  这么多信息，有一些是一看就知道是什么意思的字段。
+  其他的至少可以分为以下几个专题：
+IO thread, SQL thread状态变更
+Master_Log_File，Read_Master_Log_Pos；Relay_Log_File，Relay_Log_Pos；Relay_Master_Log_File，Exec_Master_Log_Pos的具体位置
+Replicate_Do, Replicate_Ignore 讨论
+mysql ssl连接
+replication文件 master.info, relay.info和连接信息解析
+Seconds_Behind_Master 精确性
+replication until和复制延迟控制
+skip counter忽略event计数和精确性本文只涉及第一和第二个议题
+
+2. IO thread, SQL thread状态变更
+IO线程状态变更,对应show slave status的Slave_IO_State字段
+名称	状态值	解释
+wait_master	Waiting for master update	
+connect_master	Connecting to master	
+check_master	Checking master version	
+register_slave	Registering slave on master	
+request_binlog	Requesting binlog dump	
+request_wait_reconnect	Waiting to reconnect after a failed binlog dump request	
+request_reconnecting	Reconnecting after a failed binlog dump request	
+wait_event	Waiting for master to send event	
+queue_to_relay_log	Queueing master event to the relay log	
+read_wait_reconnect	Waiting to reconnect after a failed master event read	
+read_reconnecting	Reconnecting after a failed master event read	
+wait_relay_space	Waiting for the slave SQL thread to free enough relay log space	
+wait_slave_mutex	Waiting for slave mutex on exit	
+状态变更图如下：
+io_thread 状态变更
+代码请参考sql/slave.cc的handle_slave_io函数
+
+SQL线程状态变更,对应服务器上SQL线程的State字段，通过show processlist查看
+名称	状态值	解释
+wait_relay_event	Waiting for the next event in relay log	
+read_relay	Reading event from the relay log	
+wait_io_thread	Has read all relay log; waiting for the slave I/O thread to update it	
+make_temp_file	Making temp file	
+wait_slave_mutex	Waiting for slave mutex on exit	
+状态变更图如下：
+
+sql_thread 状态变更
+
+代码请参考sql/slave.cc的handle_slave_sql函数
+
+
+3. Master_Log_File，Read_Master_Log_Pos；Relay_Log_File，Relay_Log_Pos；Relay_Master_Log_File，Exec_Master_Log_Pos的具体位置
+定义
+Master_Log_File，Read_Master_Log_Pos 记录了IO thread读到的当前master binlog文件和位置，对应master的binlog文件和位置。
+Relay_Log_File，Relay_Log_Pos记录了SQL thread执行到relay log的那个文件和位置，对应的是slave上的relay log文件和位置。
+Relay_Master_Log_File，Exec_Master_Log_Pos记录的是SQL thread执行到master binlog的文件和位置，对应的master上binlog的文件和位置。
+日志文件介绍需要明确这几个值的意思，我们首先需要了解binlog日志文件和relay log日志文件的具体结构。binlog的文件格式可以参考 Mats Kindah和Lars Thalman的binlog API文档。binlog的event可以参考我之前的blog和binlog events 介绍
+binlog数据文件示例binlog文件和relay log文件都可以用mysqlbinlg工具来打开。下图是一个mysqlbinlog解析普通的binlog文件出来的文本文件：我们这里主要是row方式的binlog。
+注意：binlog的event语句开始位置就是二进制binlog文件的字节偏移位置。而且根据上一个event的end_log_pos可以找到下一个event开始的位置，如上图所示。
+
+relay log数据文件示例binlog文件和relay log文件都可以用mysqlbinlg工具来打开。下图是一个mysqlbinlog解析普通的relay log文件出来的文本文件：relay log和binlog记录方式基本相同，最大的不同就是end_log_pos记录的是master的binlog文件中event的位置，而不是relay log自己event的位置。如图所示，上一个event的end_log_pos和下一个relay log event开始的位置不一样。
+为什么需要这样设置？原因很简单，就是为了方便找到master binlog的位置，在slave上，记录relay log 下一个event的开始偏移意义不大，但是如果记录了master binlog的偏移量，我们就可以在SQL thread中明确我们执行到master的某个binlog的哪个位置了。那么是哪个binlog列。我们找到relay log的最前面。
+
+
+
+如图所示，每个relay log开头都有这么一个rotate event，也就是当前master的binlog文件名。引用一下Automated master failover的一页PPT如下。
+
+
+
+这里列出了Read_Master_Log_Pos，Relay_Log_Pos，Exec_Master_Log_Pos 的具体位置。
+
+IO thread 把所有从master读到的binlog记录到本地的binlog中，所以relay log的最后一个event的end log_pos就是Read_Master_Log_Pos
+SQL thread 按照transaction来执行，所以Exec_Master_Log_Pos对应relay log中最后一个事务event的end_log_pos，这个位置对应的是master的binlog的位置。
+Relay_Log_Pos 记录的是SQL thread执行的event在relay log中结束位置，这个才是relay log的偏移量。
+
+4. 参考资料
+mysql reference IO 线程状态
+
+mysql reference SQL 线程状态
+
+mysql reference show slave status
+
+binlog events
+
+binlog API
+
+Automated master failover
