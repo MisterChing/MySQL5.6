@@ -1,0 +1,141 @@
+最近在学习和研究MySQL的MVCC和事务相关机制。
+简单整理一下，希望够通俗易懂了啊。
+不过读本文之前，推荐先阅读：
+
+《MySQL数据库InnoDB存储引擎Log漫游》 三篇系列文章：http://www.mysqlops.com/2012/04/06/innodb-log1.html
+这三篇文章通俗易懂的介绍了MySQL本身undo和redo的结构和相关概念。
+
+《MySQL Innodb日志机制深入分析》http://blog.csdn.net/yah99_wolf/article/details/6567869
+这篇文章主要介绍了check_point,lsn等相关redo文件位置的概念。
+
+ 
+
+如果你对b-tree等MySQL基础的索引结构不了解的话，请详细阅读：
+
+《由浅入深理解索引的实现》 http://www.mysqlops.com/2011/11/24/understanding_index.html
+另外，说一句，上面的两个系列文章都是sleebin9的作品，这家伙技术牛逼，文字功底和逻辑思维能力也太牛了，非池中物啊！
+
+ 
+
+如果想了解MySQL文件io相关的资料和参数，请参考淘宝丁奇的ppt：http://www.slideshare.net/mryufeng/mysqlio-12891332
+文章中有任何错漏之处，麻烦各位大牛及时指出。
+
+ 
+
+ 
+
+update流程事务相关介绍
+
+假设现在有一个事务，需要执行以下的一条update语句。
+那么在MySQL上，它是怎么完成的列。
+begin
+update test set c1=1 where id =5
+commit
+注：原c1=3
+
+本文主要关注undo,redo等涉及事务信息，对细节和锁的详情不详细深入。
+锁的情况可以参考：《MySQL数据库InnoDB存储引擎中的锁机制》http://www.mysqlops.com/2012/05/19/locks_in_innodb.html#more-3169
+
+ 
+
+ 
+
+begin：
+根据事务隔离级别，可能要记录read view等信息。
+
+update 语句：
+1、走btree找到id=5的叶子节点。这里走到页一级以后，该页需要加入buffer pool，并根据访问频率调整它在LRU list中的位置。
+2、由于是update，他需要更新该行记录。所以需要获得X锁。注意，我们这里修改的只是非主键。如果修改主键值，(比如 update test set id=1 where id=5)那么MySQL对应的会在新主键页上插入一行(id=1)，并将原主键行(id=5)处标记为已删除。如果新增的行导致页分裂，那么Innodb在现有的版本上还需要锁定上层的中间节点。目前Innodb在所有中间节点上只有一个锁，如果还有其他节点需要分裂，那就只能等待这个唯一的锁了。
+3、获得undo slot。在目前的版本中，只有一个undo segment，每个undo segment包含有效的undo slot只有1023个(新版本中应该有128*1023个)。每个线程可能有一个或者两个undo slot。insert undo slot(insert语句需要申请)或者update undo slot(delete和update申请update undo slot)。所以并发的写线程太多，在MySQL来说目前还是有问题的，MySQL有可能会报undo slot槽不够了。每个undo slot对应一个线程，用完了需要归还的。为了实现MVCC，MySQL使用了review。这里还有一个read view的问题。MySQL支持四种事务隔离级别 Serial 本文后面简称SER， Read Repeatable 本文后面简称RR， Read Commit 本文后面简称RC， Read Uncommit 本文后面简称RU。read view是在每个事务或者query开始的时候保存起来的当前事务最小和最大事务号，根据会话的事务隔离级别不同而在不同层次上保存。在走到页节点查询数据的时候可以用这两个事务号来对比，以确定对应数据对本事务是否可见。例如，在RC下是为每个Query保存了一个read view，这样其他的事务提交了，本事务在query开始前保存的read review就大于已提交的事务，可以读已提交事务的数据。而在RR下，read view是在事务开始前保存的，那么read view事务号就小于那些在本事务开始后提交的事务，也就无法看到在本事务开始后其他事务提交的数据了，保证了可重复读。
+4、按照日志先行的策略，需要把日志写进去才能做具体的操作，那么这里我们要写undo，也需要先把undo 的redo写好。所以MySQL会先在redo中记录undo的space_id,page_id,trx_id。redo为物理页记录方式。为crash恢复做准备。
+5、在undo中记录c1=3。undo是用逻辑方式记录的。undo slot记录了c1=3的信息。
+6、日志先行，我们现在需要修改具体的数据了，先记录redo。c1=1的物理页
+7、真正的修改id=5这一行。对应行的undo ptr指向c1=3的undo slot。修改了数据以后，该页为脏页，由mysql的master thread来
+
+commit：
+8、写binlog buffer，根据sync_binlog来判断是否要刷盘。
+9、确认是否能够释放undo slot。如果是insert 的话，undo slot可以立即释放，因为它的undo 信息不被其他线程所需要(其他线程不会去访问一个不存在的数据)。否则不能清理的话，转到undo history里面去。
+10、根据innodb_flush_log_at_trx_commit的设置判读是否需要刷buffer和刷盘。
+11、在iblog中记录事务提交信息。这个信息只保存在redo log的第一个文件头上。返回用户事务执行成功。
+
+ 
+
+ 
+
+ 
+
+ 
+
+crash recovery:
+crash recovery主要是基于check point来使数据达到一致性状态的。
+对应的在前面介绍的场景下恢复分为以下几种情况：
+这里有几个关键节点:
+a、第4步:undo的redo写入磁盘。
+b、第6步：数据变更的redo写入磁盘。
+c、checkpoint大于第6步写入磁盘的lsn。
+
+ 
+
+在第4步以前，如果crash掉了。那么MySQL重启以后，读redo也无法得到任何改事务的操作信息。不过幸运的是，数据库也没有返回给应用程序说操作成功。应用程序进行异常处理就行了。
+如果b之前crash，由于undo的信息写入了redo里面，MySQL读取redo以后，会构建undo信息。但是此时checkpoint肯定还没有赶上(参考《MySQL Innodb日志机制深入分析》)。此时数据没有被修改，通过检查页上最新的修改trx_id就可以判断回滚策略了。这里也就是说数据不用修改。由于MySQL也没有返回给用户成功的信息，所以也没有问题。
+下面就要分两种情况了。第一种情况：如果应用程序收到了操作成功的信息，但是checkpoint没有赶上。crash恢复的时候，在checkpoint之后提交的事务全部要回滚，redo恢复的时候不是把undo信息恢复出来了吗，根据undo信息和页上最新修改trx_id，就可以将数据页恢复到c1=3。这里应用程序收到了update成功的消息，但是实际上数据却恢复为c1=3，就相当于数据丢失了。另外，因为binlog此时有可能已经生成并传给备机(这里有可能在本地还没有落到磁盘，还在buffer里面，就通过网络上传输到备机了，我就遇到过很多次)，那么备机有可能已经接收并应用成功了。这种情况下主备机的数据都不一致了。
+另外一种情况，checkpoint赶上来了。那么皆大欢喜，redo恢复完了以后，这个undo可以直接丢掉。并且数据保持为c1=1
+ 
+
+ 
+
+ 
+
+MVCC多版本介绍
+
+上面是undo,redo和crash recovery的一些内容。
+
+跟MVCC关系不大，我们再简单说说此时有并发读的情况
+如果在此时有select * from test where id=5的读过来。
+根据事务隔离级别有SER，RR，RC，RU几种区别。在各个隔离级别下有不同的read view。
+注意：MySQL的每一行都记录了最新操作它的trx_id
+
+ 
+
+序列SER：由于没有并发，所以读到的数据肯定是之前commit好的，放心读吧。
+其他的情况下：MySQL首先会判读read view。
+
+可重复读RR：小于read view最小的trx_id的，这一行已经是事务开始之前commit的，那么可以放心大胆的读。大于read view最小的trx_id，为了保证可重复读，那么就需要根据undo ptr找到最新但是trx_id小于本事务trx_id的版本。Read view是在事务开始的时候建立的。
+读提交过的数据RC：跟RR不同，read view是query开始的时候建立的。小于read view最小的trx_id的，这一行已经是事务开始之前commit的，那么可以放心大胆的读。大于read view最小的trx_id，为了保证读已提交的，只需要找到最新的已经提交的版本（如果有trx操作了它，但是在做其他的update之类的，那么这个版本就需要忽略，继续回溯）
+读未提交的数据RU：看到什么读什么，管你有没有提交。
+
+
+硬豆瓣说道：
+2012年06月11日3:13 上午
+“crash恢复的时候，在checkpoint之后提交的事务全部要回滚”，这句是不是有点问题，记录了redo的会持久化吧
+
+pickup.lichun说道：
+2012年06月11日2:30 下午
+数据库crash以后，数据需要恢复到一致性的状态。那么恢复到哪个状态列，MySQL就是恢复到最新的checkpoint的状态。
+而有些记录的redo的，可能事务还没有提交列，比如我上面举的例子：这个事务里面update完了以后还需要insert一条记录，那么update的redo是落盘了，但是肯定是需要回滚掉的。
+可能是我上面没有说清楚吧？篇幅有限。呵呵
+
+MYSQL数据丢失讨论 | 沃趣科技说道：
+2013年04月9日5:40 下午
+[...] InnoDB的日志你还可以参考这篇文章 [...]
+
+chen说道：
+2013年09月25日5:28 下午
+pickup.lichun说道：
+2012年06月11日2:30 下午
+数据库crash以后，数据需要恢复到一致性的状态。那么恢复到哪个状态列，MySQL就是恢复到最新的checkpoint的状态。
+而有些记录的redo的，可能事务还没有提交列，比如我上面举的例子：这个事务里面update完了以后还需要insert一条记录，那么update的redo是落盘了，但是肯定是需要回滚掉的。
+可能是我上面没有说清楚吧？篇幅有限。呵呵
+
+我理解的是一个事务没有commit完成，redo是不会刷到磁盘的，另外，从日志的生命周期来看，应该是日志刷盘与数据刷盘后，再更改checkpoint的状态，这么理解的话checkpoint的lsn应该是最小的，日志刷盘后，crash后应该能恢复到redo刷盘的lsn点
+
+407361231@qq.com说道：
+2014年01月18日10:24 上午
+看到这篇文章，有疑点，如下
+1，文章中的第六步和第七步应该反过来，先执行dml的修改，然后再写dml的redo。
+2，11步貌似也有问题
+
+pickup.lichun说道：
+2014年09月24日11:12 上午
+数据库都是日志先行的啊，不写日志，数据库崩溃了，数据怎么恢复？
+这个步骤其实是参考《MySQL数据库InnoDB存储引擎Log漫游》 三篇系列文章：http://www.mysqlops.com/2012/04/06/innodb-log1.html
