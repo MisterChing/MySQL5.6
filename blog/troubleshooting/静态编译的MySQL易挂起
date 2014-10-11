@@ -1,0 +1,16 @@
+   准备试用MySQL, 先用它来存放收集的一些性能数据, 就找了一台16GB的x86_64机器, 自已下载了源代码进行编译. 编译成功, 建库也成功, 直接用Linux LVM下的逻辑卷做Innodb的数据文件, 以为准备工作就做完了, 可以安心使用MySQL了. 在真实使用之前, 先跑跑自带的sql-bench程序吧, 虽然看不懂sql-bench的结果, 但总算在MySQL中跑了一些SQL, 不料在这中间就出现MySQL挂起的情况.
+    事情源于发现转给sql-bench程序的参数写错了, 想测试一下innodb上的效果的, 要指定所有表的默认建表选项, 于是用Control + C中断了正在运行的程序, 用中断的方式换了几个参数后, 突然发现MySQL挂起了, 用"show status"命令查看MySQL的运行情况时, 发现大部份性能统计数值都不再变化. 以为是一时的情况, 没想到今天集团同事也遇到了同样的问题, 于是去重试了一下, 两个Control + C就让MySQL挂起了. 挂起后MySQL不能读写磁盘上所有磁盘上的表, 不能创建Innodb表, Myisam表, 连内存表也不能创建, 情况很严重.
+    内存是足够的, MySQL的进程数也只有17个, 系统资源肯定不是问题. 用strace看了一下, 出错后也没有什么有用的出错信息.
+write(3, "\16\0\0\0\4columns_priv\0", 18) = 18
+read(3, 0x71c150, 16384)    = -1 EINTR (Interrupted system call)
+--- SIGINT (Interrupt) @ 0 (0) ---
+read(3, 0x71c150, 16384)    = -1 EINTR (Interrupted system call)
+--- SIGINT (Interrupt) @ 0 (0) ---
+read(3, 0x71c150, 16384)    = -1 EINTR (Interrupted system call)
+--- SIGINT (Interrupt) @ 0 (0) ---
+read(3, 0x71c150, 16384)    = -1 EINTR (Interrupted system call)
+--- SIGINT (Interrupt) @ 0 (0) ---
+    于是请了淘宝的MySQL高手过来诊断, 他发现我的MySQL是静态编译(据说这种编译方式下性能更好)的, 就是在编译时用了如下的选项.
+--with-mysqld-ldflags=-all-static 
+--with-client-ldflags=-all-static
+    估计是这个有问题, 静态编译和动态编译会使用不同的线程库(具体情况不清楚), 很有可能是这个问题, 就去掉了这两个选项重新编译了一下. 然后继续Control + C了几十次, 都没有能再重现挂起的情况.
