@@ -1,0 +1,63 @@
+InnoDB作为MySQL主流的存储引擎之一拥有许多重要的特性，其中一个就是支持数据的crash safe，既MySQL意外崩溃之后数据能够恢复到正确的状态。InnoDB采用了许多技术来实现数据的crash safe，包括日志先行，checksum，checkpoint以及今天要讲的doublewrite技术等等。
+
+首先介绍一下doublewrite的概念，通俗的讲就是一份数据写两次盘，它的作用是防止InnoDB的page在刷盘过程中出现部分写的错误。我们知道InnoDB是支持数据可持久化的，因此内存中的数据最终要落到磁盘上，这就有一个数据刷盘的过程。一般操作系统的最小存储单元是页，一个页的大小是4K bytes。而操作系统刷盘的过程对每一个页做一个原子操作，这就是说要么一个页完全被写到磁盘上，要么这个页完全不写，不会出现一个页的部分数据写出的情况。
+
+而InnoDB的一个page的默认大小是16K，虽然在MySQL5.6 之后page的大小可以设置成8k,4k或其他大小，但是在大多数情况下page在刷盘过程中容易出现部分写的错误。既一个page中的数据只写了一部分到磁盘上，可能是4k或8k，总之少于一个page的大小。此时磁盘上的数据页就被破坏了，不再可用。可能有人会说InnoDB不是有redolog吗，可以从日志中恢复出来。其实redolog中只是记录了一堆的物理操作，它必须应用到一个正确的page上面。如果page本身被破坏了，则无法恢复出正确的数据。
+
+doublewrite机制的原理是：一个数据page刷两次盘，且两次刷盘写在不同的地方。第一次写到doublewrite物理空间中，第二次写到数据page对应的表空间的位置。这样就保证了至少有一个地方的page是正确的。在恢复过程中，如果发现数据一个page的内容不正确，则从doublewrite空间中读取这个page。
+
+关于doublewrite的物理结构描述可以在文件trx0sys.h中找到，而doublewrite的操作函数定义在文件buf0dblwr.h和buf0dblwr.cc中。
+
+doublewrite物理存储空间的结构如下图所示：
+QQ截图20140926211427
+
+doublewrite的物理存储空间由两个块组成，分别是block1和block2，每个块有1M大小。doublewrite的信息存放在系统表空间的第6个page当中，既trx_sys页的最后200个字节的内容。其中包括了segment段信息，以及两个block的起始地址。可以看到这些信息写了两遍，目的也是为了保证doublewrite信息的安全性。
+
+doublewrite的内存管理结构如下所示：
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+/** Doublewrite control struct */
+struct buf_dblwr_t{
+    ib_mutex_t  mutex;  
+    ulint       block1; 
+    ulint       block2; 
+    ulint       first_free;
+    ulint       b_reserved;
+    os_event_t  b_event;
+    ulint       s_reserved;
+    os_event_t  s_event;
+    bool*       in_use; 
+    bool        batch_running;
+    byte*       write_buf;
+    byte*       write_buf_unaligned;
+    buf_page_t**    buf_block_arr;
+};
+各个成员的作用介绍如下：
+block1，block2：指向外存dblwr上的两个block的起始page。
+write_buf_unaligned，write_buf：指向dblwr内存空间的起始地址，其中一个是按page大小取整的地址。
+buf_block_arr：已经存放在dblwr内存空间的数据块数组。
+first_free：dblwr内存空间中第一个空闲位置。
+batch_running：表明是否在进行批量刷出操作。
+in_use：指明dblwr内存空间的各个位置是否被使用了。
+b_reserved，b_event：用于页批量刷出操作的计数器标识符和信号量。
+s_reserved，s_event：用于单个页刷出操作的计数器标识符和信号量。
+
+该内存管理结构的一个作用是用来计算一个page应该被写入到doublewrite外存空间的具有位置。我们知道doublewrite外存空间由两个block组成，而这两个block在空间上是不连续的，但是在dblwr内存空间是一个连续的2M空间。另外dblwr内存中的page有两种刷出方式：1，一次只有一个page被刷出；2，多个page被合并刷出。这两种方式分别被应用不同的page刷出场景。关于page的刷出场景会在后面的bufferpool实现介绍中详细的说明。
+
+dblwr内存与外存的关系如下：
+0011
