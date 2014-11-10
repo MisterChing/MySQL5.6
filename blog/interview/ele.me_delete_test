@@ -1,0 +1,85 @@
+root@localhost : testdata 03:51:31> select SQL_NO_CACHE count(field_1) from testdata1;
++----------------+
+| count(field_1) |
++----------------+
+|       60000000 |
++----------------+
+1 row in set (1 min 32.00 sec)
+
+
+root@localhost : testdata 04:59:22> select SQL_NO_CACHE count(*) from testdata1;
++----------+
+| count(*) |
++----------+
+| 10000000 |
++----------+
+1 row in set (14.98 sec)
+
+
+root@localhost : testdata 04:59:57> select SQL_NO_CACHE count(*) from testdata1;
++----------+
+| count(*) |
++----------+
+| 10000000 |
++----------+
+1 row in set (2 min 38.10 sec)
+
+root@localhost : testdata 05:04:28> select SQL_NO_CACHE count(*) from testdata1;
++----------+
+| count(*) |
++----------+
+| 10000000 |
++----------+
+1 row in set (15.62 sec)
+
+
+-rw-rw---- 1 mysql mysql        10506 Sep 30 17:07 testdata1.frm
+-rw-rw---- 1 mysql mysql  36209426432 Nov  9 16:57 testdata1.ibd
+
+root@localhost : testdata 04:57:37> optimize table testdata1;
++--------------------+----------+----------+-------------------------------------------------------------------+
+| Table              | Op       | Msg_type | Msg_text                                                          |
++--------------------+----------+----------+-------------------------------------------------------------------+
+| testdata.testdata1 | optimize | note     | Table does not support optimize, doing recreate + analyze instead |
+| testdata.testdata1 | optimize | status   | OK                                                                |
++--------------------+----------+----------+-------------------------------------------------------------------+
+2 rows in set (3 min 15.65 sec)
+
+
+-rw-rw---- 1 mysql mysql        10506 Nov  9 17:08 testdata1.frm
+-rw-rw---- 1 mysql mysql   3426746368 Nov  9 17:10 testdata1.ibd
+
+root@localhost : testdata 05:06:32> select SQL_NO_CACHE count(*) from testdata1;
++----------+
+| count(*) |
++----------+
+| 10000000 |
++----------+
+1 row in set (40.83 sec)
+
+root@localhost : testdata 05:12:27> select SQL_NO_CACHE count(*) from testdata1;
++----------+
+| count(*) |
++----------+
+| 10000000 |
++----------+
+1 row in set (7.39 sec)
+
+root@localhost : testdata 05:13:35> 
+
+
+root@localhost : testdata 08:02:32> select SQL_NO_CACHE count(field_1) from testdata1;
++----------------+
+| count(field_1) |
++----------------+
+|       60000000 |
++----------------+
+1 row in set (15 min 9.42 sec)
+
+root@localhost : testdata 08:24:32> select SQL_NO_CACHE count(field_1) from testdata1;
++----------------+
+| count(field_1) |
++----------------+
+|       60000000 |
++----------------+
+1 row in set (1 min 35.06 sec)
